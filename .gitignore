@@ -1,0 +1,6 @@
+data/
+periods_data/
+periods_data_with_indicators/
+saved_models_cross_validation/
+saved_models_with_indicators/
+__pycache__
