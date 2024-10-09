@@ -26,13 +26,13 @@ def add_indicators(input_file, output_file):
 
 # Список файлов и их периодов
 files = [
-    ('periods_data/BTCUSDT_1d.csv', 'periods_data_with_indicators/BTCUSDT_1d_with_indicators.csv'),
-    ('periods_data/BTCUSDT_1h.csv', 'periods_data_with_indicators/BTCUSDT_1h_with_indicators.csv'),
-    ('periods_data/BTCUSDT_1min.csv', 'periods_data_with_indicators/BTCUSDT_1min_with_indicators.csv'),
-    ('periods_data/BTCUSDT_1mo.csv', 'periods_data_with_indicators/BTCUSDT_1mo_with_indicators.csv'),
-    ('periods_data/BTCUSDT_4h.csv', 'periods_data_with_indicators/BTCUSDT_4h_with_indicators.csv'),
-    ('periods_data/BTCUSDT_5m.csv', 'periods_data_with_indicators/BTCUSDT_5m_with_indicators.csv'),
-    ('periods_data/BTCUSDT_15m.csv', 'periods_data_with_indicators/BTCUSDT_15m_with_indicators.csv')
+    ('copies_for_trading/BTCUSDT_1d.csv', 'periods_data_with_indicators/BTCUSDT_1d_with_indicators.csv'),
+    ('copies_for_trading/BTCUSDT_1h.csv', 'periods_data_with_indicators/BTCUSDT_1h_with_indicators.csv'),
+    ('copies_for_trading/BTCUSDT_1min.csv', 'periods_data_with_indicators/BTCUSDT_1min_with_indicators.csv'),
+    ('copies_for_trading/BTCUSDT_1mo.csv', 'periods_data_with_indicators/BTCUSDT_1mo_with_indicators.csv'),
+    ('copies_for_trading/BTCUSDT_4h.csv', 'periods_data_with_indicators/BTCUSDT_4h_with_indicators.csv'),
+    ('copies_for_trading/BTCUSDT_5m.csv', 'periods_data_with_indicators/BTCUSDT_5m_with_indicators.csv'),
+    ('copies_for_trading/BTCUSDT_15m.csv', 'periods_data_with_indicators/BTCUSDT_15m_with_indicators.csv')
 ]
 
 # Применение индикаторов ко всем файлам

@@ -4,6 +4,7 @@ import os
 import csv
 from datetime import datetime
 import sys
+import time
 
 data_written_event = asyncio.Event()
 
@@ -28,6 +29,7 @@ def safe_save_to_csv(filename, data):
             for row in reader:
                 existing_rows.add(row[0])
 
+    new_data_written = False  # Флаг для отслеживания новых данных
     with open(filename, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         if os.path.getsize(filename) == 0:
@@ -43,7 +45,11 @@ def safe_save_to_csv(filename, data):
                     entry[4],
                     entry[5]
                 ])
-    data_written_event.set()
+                new_data_written = True
+    if new_data_written:
+        data_written_event.set()  # Сигнализируем, что данные обновлены
+    else:
+        data_written_event.clear()  # Если данных нет, сбрасываем событие
 
 def get_last_timestamp(filename):
     if not os.path.isfile(filename):
@@ -72,7 +78,7 @@ def display_progress(progress_info):
         sys.stdout.write(f"{year}y {interval}:\t{bar} {total_loaded} / {total_to_load_display}\n")
     sys.stdout.flush()
 
-async def continuous_data_fetch(symbol, intervals, year=2024, directory='data'):
+async def continuous_data_fetch(symbol, intervals, year=2024, directory='periods_data'):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
@@ -83,36 +89,53 @@ async def continuous_data_fetch(symbol, intervals, year=2024, directory='data'):
 
     progress_info = {interval: (year, 0, 0) for interval in intervals}
 
-    async with aiohttp.ClientSession() as session:
-        for interval in intervals:
-            filename = os.path.join(directory, f'{symbol}_{interval_mapping.get(interval, interval)}.csv')
-            last_timestamp = get_last_timestamp(filename)
-            total_loaded = 0
+    delay = 1  # Начальная задержка
+    max_delay = 60  # Максимальная задержка между попытками переподключения
 
-            if last_timestamp is None:
-                start_time = int(datetime(year, 1, 1, 0, 0).timestamp() * 1000)
-            else:
-                start_time = last_timestamp + 1
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for interval in intervals:
+                    filename = os.path.join(directory, f'{symbol}_{interval_mapping.get(interval, interval)}.csv')
+                    last_timestamp = get_last_timestamp(filename)
+                    total_loaded = 0
 
-            while True:
-                data = await get_binance_data(session, symbol, interval, start_time)
-                if not data:
-                    break
+                    if last_timestamp is None:
+                        start_time = int(datetime(year, 1, 1, 0, 0).timestamp() * 1000)
+                    else:
+                        start_time = last_timestamp + 1
 
-                safe_save_to_csv(filename, data)
-                total_loaded += len(data)
-                last_timestamp = data[-1][0]
-                start_time = last_timestamp + 1
+                    while True:
+                        data = await get_binance_data(session, symbol, interval, start_time)
+                        if not data:
+                            break
 
-                progress_info[interval] = (year, total_loaded, total_loaded + 1000)
-                display_progress(progress_info)
+                        safe_save_to_csv(filename, data)
+                        total_loaded += len(data)
+                        last_timestamp = data[-1][0]
+                        start_time = last_timestamp + 1
 
-                await data_written_event.wait()
-                data_written_event.clear()
+                        progress_info[interval] = (year, total_loaded, total_loaded + 1000)
+                        # display_progress(progress_info)
+
+                        print("В binance_connection.py что-то происходит ...")
+
+                        await data_written_event.wait()
+                        data_written_event.clear()
+
+                        delay = 1  # Сброс задержки после успешного подключения
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            print(f"Ошибка соединения: {e}. Переподключение через {delay} секунд...")
+            time.sleep(delay)
+            delay = min(max_delay, delay * 2)  # Экспоненциальное увеличение задержки
+        except Exception as e:
+            print(f"Неожиданная ошибка: {e}")
+            break
 
 # Запуск программы
 symbol = 'BTCUSDT'
-intervals = ['1M', '1d', '4h', '1h', '15m', '5m', '1m']
+# intervals = ['1M', '1d', '4h', '1h', '15m', '5m', '1m']
+intervals = ['1m', '5m', '15m', '1h', '4h', '1d', '1M']
 year = 2024
 
 asyncio.run(continuous_data_fetch(symbol, intervals, year))
