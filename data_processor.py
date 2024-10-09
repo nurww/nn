@@ -1,9 +1,7 @@
-# data_processor.py
 import pandas as pd
 import os
 from tqdm import tqdm
 import time
-import pandas as pd
 import numpy as np
 
 # Маппинг для правильных названий файлов
@@ -16,6 +14,12 @@ interval_mapping = {
     '15m': '15m',  # 15 минут
     '5m': '5m'     # 5 минут
 }
+
+# Функция для загрузки уже существующих данных
+def load_existing_data(output_filename):
+    if os.path.exists(output_filename):
+        return pd.read_csv(output_filename)
+    return pd.DataFrame()
 
 # Функция для разделения данных на тренировочные и тестовые выборки
 def split_data_by_time(file_path, train_size=0.8):
@@ -52,42 +56,55 @@ def load_csv_data(folder_path, symbol, intervals):
     return data
 
 # Функция для объединения данных из разных временных интервалов
-def merge_data(data_dict):
+def merge_data(data_dict, existing_data):
     merged_data = pd.DataFrame()
     for interval, df in data_dict.items():
         df['Interval'] = interval  # Добавляем столбец для указания интервала
         merged_data = pd.concat([merged_data, df], axis=0)
     
-    merged_data.sort_values(by='Время открытия (UTC)', inplace=True)
-    merged_data.reset_index(drop=True, inplace=True)
-    return merged_data
+    if not existing_data.empty:
+        # Оставляем только новые данные, которых нет в уже существующих
+        merged_data = merged_data[~merged_data['Время открытия (UTC)'].isin(existing_data['Время открытия (UTC)'])]
+    
+    return pd.concat([existing_data, merged_data]).sort_values(by='Время открытия (UTC)').reset_index(drop=True)
 
 # Функция для нормализации данных (масштабирование)
-def normalize_data(df, columns):
+def normalize_data(df, columns, existing_data):
     df_normalized = df.copy()
     for column in columns:
-        min_value = df[column].min()
-        max_value = df[column].max()
+        if not existing_data.empty:
+            min_value = min(existing_data[column].min(), df[column].min())
+            max_value = max(existing_data[column].max(), df[column].max())
+        else:
+            min_value = df[column].min()
+            max_value = df[column].max()
         df_normalized[column] = (df[column] - min_value) / (max_value - min_value)
     return df_normalized
 
 # Функция для сохранения объединенных и нормализованных данных обратно в CSV
 def save_merged_data(df, output_filename):
     output_path = os.path.join('data', output_filename)
+    
+    # Проверка на существование папки, создание если она отсутствует
+    output_dir = os.path.dirname(output_path)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
     df.to_csv(output_path, index=False)
     print(f'Объединенные данные сохранены в {output_path}')
 
 # Пример обработки файлов с прогресс-баром
 def process_data(symbol, intervals, folder_path='periods_data_with_indicators', output_filename='merged_data_with_indicators.csv'):
     print('Загрузка данных...')
+    existing_data = load_existing_data(f'data/{output_filename}')  # Загружаем уже существующие данные
     data_dict = load_csv_data(folder_path, symbol, intervals)
     
     print('Объединение данных...')
-    merged_data = merge_data(data_dict)
+    merged_data = merge_data(data_dict, existing_data)
     
     print('Нормализация данных...')
     columns_to_normalize = ['Цена открытия', 'Максимум', 'Минимум', 'Цена закрытия', 'Объем', 'RSI', 'MACD', 'SMA_20', 'EMA_20', 'Upper_BB', 'Middle_BB', 'Lower_BB', 'OBV']
-    normalized_data = normalize_data(merged_data, columns_to_normalize)
+    normalized_data = normalize_data(merged_data, columns_to_normalize, existing_data)
     
     print('Сохранение объединенных данных...')
     save_merged_data(normalized_data, output_filename)

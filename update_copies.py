@@ -22,11 +22,14 @@ def update_copy(original_file, copy_file, last_timestamp_file):
         # Загрузка копии файла
         if os.path.exists(copy_file):
             df_copy = pd.read_csv(copy_file)
+            # Удаление строк с дубликатами на всякий случай
+            df_copy.drop_duplicates(subset=['Время открытия (UTC)'], keep='last', inplace=True)
         else:
             df_copy = pd.DataFrame()
 
         # Добавление новых данных к копии
         df_copy = pd.concat([df_copy, df_new], ignore_index=True)
+        df_copy.drop_duplicates(subset=['Время открытия (UTC)'], keep='last', inplace=True)
         df_copy.to_csv(copy_file, index=False)
 
         # Обновление последнего таймстампа

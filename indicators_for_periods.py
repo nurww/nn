@@ -1,27 +1,48 @@
-import matplotlib.pyplot as plt
 import pandas as pd
 import talib as ta
 import os
 
-# Функция для добавления индикаторов
+# Функция для добавления индикаторов только к новым данным
 def add_indicators(input_file, output_file):
-    # Загрузка данных
-    df = pd.read_csv(input_file)
+    # Загрузка существующего файла с индикаторами, если он существует
+    if os.path.exists(output_file):
+        df_existing = pd.read_csv(output_file)
+        last_existing_timestamp = df_existing['Время открытия (UTC)'].max()  # Последняя запись
+    else:
+        df_existing = pd.DataFrame()  # Если файл не существует, создаем пустой DataFrame
+        last_existing_timestamp = None
 
-    # Убедитесь, что столбцы называются так, как ожидается для индикаторов
-    # df['Date'] = pd.to_datetime(df['Время открытия (UTC)'])  # Приводим столбец времени к нужному формату
-    # df.set_index('Date', inplace=True)
+    # Загрузка новых данных
+    df_new = pd.read_csv(input_file)
 
-    # Рассчет индикаторов
-    df['RSI'] = ta.RSI(df['Цена закрытия'], timeperiod=14)  # Индекс относительной силы (RSI)
-    df['MACD'], df['MACD_signal'], df['MACD_hist'] = ta.MACD(df['Цена закрытия'], fastperiod=12, slowperiod=26, signalperiod=9)  # MACD
-    df['SMA_20'] = ta.SMA(df['Цена закрытия'], timeperiod=20)  # Простая скользящая средняя
-    df['EMA_20'] = ta.EMA(df['Цена закрытия'], timeperiod=20)  # Экспоненциальная скользящая средняя
-    df['Upper_BB'], df['Middle_BB'], df['Lower_BB'] = ta.BBANDS(df['Цена закрытия'], timeperiod=20, nbdevup=2, nbdevdn=2)  # Полосы Боллинджера
-    df['OBV'] = ta.OBV(df['Цена закрытия'], df['Объем'])  # Индикатор балансового объема (OBV)
+    # Если есть уже существующие данные, фильтруем новые записи, которых нет в существующем файле
+    if last_existing_timestamp:
+        df_new = df_new[df_new['Время открытия (UTC)'] > last_existing_timestamp]
 
-    # Сохранение данных с индикаторами
-    df.to_csv(output_file, index=False)
+    # Если новых данных нет, завершаем выполнение
+    if df_new.empty:
+        print(f"Нет новых данных для файла {input_file}")
+        return
+
+    # Рассчет индикаторов для новых данных
+    df_new['RSI'] = ta.RSI(df_new['Цена закрытия'], timeperiod=14)
+    df_new['MACD'], df_new['MACD_signal'], df_new['MACD_hist'] = ta.MACD(df_new['Цена закрытия'], fastperiod=12, slowperiod=26, signalperiod=9)
+    df_new['SMA_20'] = ta.SMA(df_new['Цена закрытия'], timeperiod=20)
+    df_new['EMA_20'] = ta.EMA(df_new['Цена закрытия'], timeperiod=20)
+    df_new['Upper_BB'], df_new['Middle_BB'], df_new['Lower_BB'] = ta.BBANDS(df_new['Цена закрытия'], timeperiod=20, nbdevup=2, nbdevdn=2)
+    df_new['OBV'] = ta.OBV(df_new['Цена закрытия'], df_new['Объем'])
+
+    # Объединение существующих данных с новыми
+    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+    df_combined.drop_duplicates(subset=['Время открытия (UTC)'], keep='last', inplace=True)
+
+    # Проверяем, существует ли папка для сохранения output файла
+    output_dir = os.path.dirname(output_file)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Сохранение объединенных данных с индикаторами
+    df_combined.to_csv(output_file, index=False)
     print(f"Индикаторы успешно добавлены и сохранены в {output_file}")
 
 # Список файлов и их периодов
@@ -39,4 +60,3 @@ files = [
 for input_file, output_file in files:
     if os.path.exists(input_file):
         add_indicators(input_file, output_file)
-
