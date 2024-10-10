@@ -1,141 +1,189 @@
 import aiohttp
 import asyncio
-import os
-import csv
-from datetime import datetime
-import sys
-import time
+import mysql.connector
+from mysql.connector import Error
+from tqdm import tqdm
+from datetime import datetime, timezone, timedelta
 
-data_written_event = asyncio.Event()
+# Семафор для ограничения параллельных запросов
+semaphore = asyncio.Semaphore(3)
 
-async def get_binance_data(session, symbol, interval, start_time, limit=1000):
-    # URL для фьючерсных данных Binance
-    url = 'https://fapi.binance.com/fapi/v1/klines'
-    params = {
-        'symbol': symbol,
-        'interval': interval,
-        'startTime': start_time,
-        'limit': limit
-    }
-    async with session.get(url, params=params) as response:
-        return await response.json()
-
-def safe_save_to_csv(filename, data):
-    existing_rows = set()
-    if os.path.exists(filename):
-        with open(filename, mode='r', encoding='utf-8') as file:
-            reader = csv.reader(file)
-            next(reader)
-            for row in reader:
-                existing_rows.add(row[0])
-
-    new_data_written = False  # Флаг для отслеживания новых данных
-    with open(filename, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        if os.path.getsize(filename) == 0:
-            writer.writerow(['Время открытия (UTC)', 'Цена открытия', 'Максимум', 'Минимум', 'Цена закрытия', 'Объем'])
-        for entry in data:
-            entry_time = datetime.utcfromtimestamp(entry[0] / 1000).strftime('%Y-%m-%d %H:%M:%S')
-            if entry_time not in existing_rows:
-                writer.writerow([
-                    entry_time,
-                    entry[1],
-                    entry[2],
-                    entry[3],
-                    entry[4],
-                    entry[5]
-                ])
-                new_data_written = True
-    if new_data_written:
-        data_written_event.set()  # Сигнализируем, что данные обновлены
-    else:
-        data_written_event.clear()  # Если данных нет, сбрасываем событие
-
-def get_last_timestamp(filename):
-    if not os.path.isfile(filename):
+# Подключение к базе данных MySQL
+def connect_to_db():
+    try:
+        connection = mysql.connector.connect(
+            host='localhost',
+            database='binance_data',
+            user='root',
+            password='root'
+        )
+        if connection.is_connected():
+            print("Соединение с MySQL установлено")
+        return connection
+    except Error as e:
+        print(f"Ошибка при подключении к MySQL: {e}")
         return None
-    with open(filename, mode='r', encoding='utf-8') as file:
-        lines = file.readlines()
-        if len(lines) > 1:
-            last_line = lines[-1]
-            last_timestamp = last_line.split(',')[0]
-            return int(datetime.strptime(last_timestamp, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
-    return None
 
-def display_progress(progress_info):
-    sys.stdout.write("\033[H\033[J")
-    for interval, (year, total_loaded, total_to_load) in progress_info.items():
-        total_to_load = max(total_to_load, total_loaded + 1)
-        progress_percentage = int((total_loaded / total_to_load) * 100)
-        bar_length = int((progress_percentage / 100) * 20)
-        bar = 'I' * bar_length + '.' * (20 - bar_length)
+# Получение данных с Binance
+async def get_binance_data(session, symbol, interval, start_time, limit=1000):
+    async with semaphore:
+        url = 'https://fapi.binance.com/fapi/v1/klines'
+        params = {
+            'symbol': symbol,
+            'interval': interval,
+            'startTime': start_time,
+            'limit': limit
+        }
+        async with session.get(url, params=params) as response:
+            if response.status != 200:
+                raise Exception(f"Ошибка при получении данных: {response.status}")
+            return await response.json()
+
+# Запись данных в MySQL
+def save_to_mysql(connection, data, data_interval):
+    cursor = connection.cursor()
+    sql_insert_query = """
+    INSERT INTO binance_klines (open_time, open_price, high_price, low_price, close_price, volume, close_time, data_interval)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    
+    try:
+        values = []
+        for entry in data:
+            open_time = datetime.fromtimestamp(entry[0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Проверка на существование записи перед добавлением
+            cursor.execute("SELECT COUNT(*) FROM binance_klines WHERE open_time = %s AND data_interval = %s", (open_time, data_interval))
+            result = cursor.fetchone()
+            
+            if result[0] == 0:  # Если записи нет, добавляем ее
+                close_time = datetime.fromtimestamp(entry[6] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                values.append((open_time, entry[1], entry[2], entry[3], entry[4], entry[5], close_time, data_interval))
         
-        if total_to_load > 1000:
-            total_to_load_display = f"{total_to_load // 1000}k"
+        if values:  # Если есть что добавить
+            cursor.executemany(sql_insert_query, values)
+            connection.commit()  # Фиксируем транзакцию
+            print(f"{cursor.rowcount} строк(и) добавлено")
         else:
-            total_to_load_display = str(total_to_load)
-        
-        sys.stdout.write(f"{year}y {interval}:\t{bar} {total_loaded} / {total_to_load_display}\n")
-    sys.stdout.flush()
+            print("Данные уже присутствуют в базе, добавление пропущено")
+    
+    except Error as e:
+        connection.rollback()  # Откат в случае ошибки
+        print(f"Ошибка при записи данных в MySQL: {e}")
+        raise e  # Прерываем программу в случае ошибки
 
-async def continuous_data_fetch(symbol, intervals, year=2024, directory='periods_data'):
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+# Получение последней метки времени
+def get_last_timestamp_from_db(connection, data_interval):
+    cursor = connection.cursor()
+    cursor.execute(f"SELECT MAX(open_time) FROM binance_klines WHERE data_interval = '{data_interval}'")
+    result = cursor.fetchone()
+    if result[0] is None:
+        return None
+    return int(result[0].timestamp() * 1000)  # Преобразуем объект datetime напрямую в timestamp
 
-    interval_mapping = {
-        '1M': '1mo',
-        '1m': '1min'
+# Проверка на дубликаты
+def check_for_duplicates(connection):
+    cursor = connection.cursor()
+    query = """
+    SELECT open_time, data_interval, COUNT(*)
+    FROM binance_klines
+    GROUP BY open_time, data_interval
+    HAVING COUNT(*) > 1;
+    """
+    cursor.execute(query)
+    rows = cursor.fetchall()
+
+    if rows:
+        print("Дубликаты найдены:")
+        for row in rows:
+            print(f"open_time: {row[0]}, interval: {row[1]}, количество: {row[2]}")
+    else:
+        print("Дубликатов не найдено.")
+
+# Проверка на пропуски данных
+def check_for_gaps(connection, data_interval):
+    cursor = connection.cursor()
+    cursor.execute(f"SELECT open_time FROM binance_klines WHERE data_interval = '{data_interval}' ORDER BY open_time")
+    rows = cursor.fetchall()
+
+    if len(rows) < 2:
+        print(f"Недостаточно данных для проверки интервала {data_interval}")
+        return
+
+    expected_diff = {
+        '1m': timedelta(minutes=1),
+        '5m': timedelta(minutes=5),
+        '15m': timedelta(minutes=15),
+        '1h': timedelta(hours=1),
+        '4h': timedelta(hours=4),
+        '1d': timedelta(days=1),
+        '1M': None  # Для месячного интервала особая логика
     }
 
-    progress_info = {interval: (year, 0, 0) for interval in intervals}
+    previous_time = rows[0][0]
+    for row in rows[1:]:
+        current_time = row[0]
+        if expected_diff[data_interval] is not None:
+            if current_time - previous_time > expected_diff[data_interval]:
+                print(f"Пропущенные данные между {previous_time} и {current_time} для интервала {data_interval}")
+        previous_time = current_time
 
-    delay = 1  # Начальная задержка
-    max_delay = 60  # Максимальная задержка между попытками переподключения
+# Постоянная загрузка данных
+async def continuous_data_fetch(symbol, intervals, year=2024):
+    connection = connect_to_db()
+    if connection is None:
+        return
 
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                for interval in intervals:
-                    filename = os.path.join(directory, f'{symbol}_{interval_mapping.get(interval, interval)}.csv')
-                    last_timestamp = get_last_timestamp(filename)
-                    total_loaded = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for data_interval in intervals:
+                tasks.append(fetch_and_store_data(session, connection, symbol, data_interval, year))
+            await asyncio.gather(*tasks)
 
-                    if last_timestamp is None:
-                        start_time = int(datetime(year, 1, 1, 0, 0).timestamp() * 1000)
-                    else:
-                        start_time = last_timestamp + 1
+    except Exception as e:
+        print(f"Неожиданная ошибка: {e}")
+    finally:
+        if connection.is_connected():
+            # Проверка данных после загрузки
+            for data_interval in intervals:
+                check_for_duplicates(connection)
+                check_for_gaps(connection, data_interval)
+            connection.close()
+            print("Соединение с MySQL закрыто")
 
-                    while True:
-                        data = await get_binance_data(session, symbol, interval, start_time)
-                        if not data:
-                            break
+async def fetch_and_store_data(session, connection, symbol, data_interval, year):
+    last_timestamp = get_last_timestamp_from_db(connection, data_interval)
+    total_loaded = 0
 
-                        safe_save_to_csv(filename, data)
-                        total_loaded += len(data)
-                        last_timestamp = data[-1][0]
-                        start_time = last_timestamp + 1
+    if last_timestamp is None:
+        start_time = int(datetime(year, 1, 1, 0, 0).timestamp() * 1000)
+    else:
+        start_time = last_timestamp + 1
 
-                        progress_info[interval] = (year, total_loaded, total_loaded + 1000)
-                        # display_progress(progress_info)
+    with tqdm(total=1000, desc=f"Загрузка данных для {data_interval}", unit="строк") as pbar:
+        while True:
+            try:
+                data = await get_binance_data(session, symbol, data_interval, start_time)
+                if not data:
+                    break
 
-                        print("В binance_connection.py что-то происходит ...")
+                save_to_mysql(connection, data, data_interval)
+                total_loaded += len(data)
+                last_timestamp = data[-1][0]
+                start_time = last_timestamp + 1
 
-                        await data_written_event.wait()
-                        data_written_event.clear()
+                pbar.update(len(data))
 
-                        delay = 1  # Сброс задержки после успешного подключения
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(f"Ошибка соединения: {e}. Переподключение через {delay} секунд...")
-            time.sleep(delay)
-            delay = min(max_delay, delay * 2)  # Экспоненциальное увеличение задержки
-        except Exception as e:
-            print(f"Неожиданная ошибка: {e}")
-            break
+                if len(data) < 1000:
+                    break
+            except Exception as e:
+                print(f"Ошибка при загрузке данных: {e}")
+                break
 
 # Запуск программы
 symbol = 'BTCUSDT'
-# intervals = ['1M', '1d', '4h', '1h', '15m', '5m', '1m']
-intervals = ['1m', '5m', '15m', '1h', '4h', '1d', '1M']
+intervals = ['1m', '5m', '15m', '1h', '4h', '1d']
 year = 2024
 
 asyncio.run(continuous_data_fetch(symbol, intervals, year))
