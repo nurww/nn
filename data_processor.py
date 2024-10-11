@@ -1,127 +1,152 @@
+import mysql.connector
+from mysql.connector import Error
 import pandas as pd
-import os
-from tqdm import tqdm
-import time
 import numpy as np
+import time
 
-# Маппинг для правильных названий файлов
-interval_mapping = {
-    '1M': '1mo',   # Месяц
-    '1m': '1min',  # Минута
-    '1d': '1d',    # День
-    '4h': '4h',    # 4 часа
-    '1h': '1h',    # 1 час
-    '15m': '15m',  # 15 минут
-    '5m': '5m'     # 5 минут
-}
+# Подключение к базе данных
+def connect_to_db():
+    try:
+        connection = mysql.connector.connect(
+            host='localhost',
+            database='binance_data',
+            user='root',
+            password='root'
+        )
+        if connection.is_connected():
+            print("Соединение с MySQL установлено")
+        return connection
+    except Error as e:
+        print(f"Ошибка при подключении к MySQL: {e}")
+        return None
 
-# Функция для загрузки уже существующих данных
-def load_existing_data(output_filename):
-    if os.path.exists(output_filename):
-        return pd.read_csv(output_filename)
-    return pd.DataFrame()
+# Функция для получения всех данных для нормализации
+def fetch_all_data_for_normalization(connection, interval):
+    query = f"""
+        SELECT open_price, high_price, low_price, close_price, volume, rsi, macd, macd_signal, macd_hist, sma_20, ema_20, upper_bb, middle_bb, lower_bb, obv
+        FROM binance_klines
+        WHERE data_interval = '{interval}'
+        ORDER BY open_time;
+    """
+    with connection.cursor(dictionary=True) as cursor:
+        cursor.execute(query)
+        result = cursor.fetchall()
+    return pd.DataFrame(result)
 
-# Функция для разделения данных на тренировочные и тестовые выборки
-def split_data_by_time(file_path, train_size=0.8):
-    data = pd.read_csv(f'data/{file_path}')
-    split_index = int(np.floor(len(data) * train_size))
-    
-    train_data = data[:split_index]  # Первые 80% данных для тренировки
-    test_data = data[split_index:]   # Последние 20% данных для тестирования
-    
-    # Сохранение тренировочных и тестовых данных в файлы
-    train_data.to_csv('data/train_data_with_indicators.csv', index=False)
-    test_data.to_csv('data/test_data_with_indicators.csv', index=False)
-    
-    print('Тренировочные данные сохранены как train_data_with_indicators.csv')
-    print('Тестовые данные сохранены как test_data_with_indicators.csv')
-    
-    return train_data, test_data
+# Функция для получения уже нормализованных данных
+def fetch_existing_normalized_data(connection, interval):
+    query = f"""
+        SELECT open_price_normalized, high_price_normalized, low_price_normalized, close_price_normalized, volume_normalized, rsi_normalized, macd_normalized, macd_signal_normalized, macd_hist_normalized, sma_20_normalized, ema_20_normalized, upper_bb_normalized, middle_bb_normalized, lower_bb_normalized, obv_normalized
+        FROM binance_klines_normalized
+        WHERE data_interval = '{interval}'
+        ORDER BY open_time;
+    """
+    with connection.cursor(dictionary=True) as cursor:
+        cursor.execute(query)
+        result = cursor.fetchall()
+    return pd.DataFrame(result)
 
-# Функция для загрузки данных из CSV файлов
-def load_csv_data(folder_path, symbol, intervals):
-    data = {}
-    for interval in intervals:
-        mapped_interval = interval_mapping.get(interval, interval)
-        file_path = os.path.join(folder_path, f'{symbol}_{mapped_interval}_with_indicators.csv')
-        if os.path.exists(file_path):
-            df = pd.read_csv(file_path)
-            # Проверка на пропущенные значения
-            if df.isnull().values.any():
-                print(f'Пропущенные значения в {file_path}, удаление строк с пропущенными значениями...')
-                df.dropna(inplace=True)
-            data[interval] = df
-        else:
-            print(f'Файл {file_path} не найден.')
-    return data
+# Функция для получения новых данных из оригинальной таблицы
+def fetch_new_data(connection, interval):
+    query = f"""
+        SELECT open_time, open_price, high_price, low_price, close_price, volume, close_time, rsi, macd, macd_signal, macd_hist, sma_20, ema_20, upper_bb, middle_bb, lower_bb, obv
+        FROM binance_klines
+        WHERE data_interval = '{interval}'
+        AND open_time NOT IN (SELECT open_time FROM binance_klines_normalized WHERE data_interval = '{interval}')
+        ORDER BY open_time;
+    """
+    with connection.cursor(dictionary=True) as cursor:
+        cursor.execute(query)
+        result = cursor.fetchall()
+    df = pd.DataFrame(result)
+    # Удаляем строки с отсутствующими данными в ключевых колонках
+    df_cleaned = df.dropna(subset=['rsi', 'macd', 'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv'])  
+    return df_cleaned
 
-# Функция для объединения данных из разных временных интервалов
-def merge_data(data_dict, existing_data):
-    merged_data = pd.DataFrame()
-    for interval, df in data_dict.items():
-        df['Interval'] = interval  # Добавляем столбец для указания интервала
-        merged_data = pd.concat([merged_data, df], axis=0)
-    
-    if not existing_data.empty:
-        # Оставляем только новые данные, которых нет в уже существующих
-        merged_data = merged_data[~merged_data['Время открытия (UTC)'].isin(existing_data['Время открытия (UTC)'])]
-    
-    return pd.concat([existing_data, merged_data]).sort_values(by='Время открытия (UTC)').reset_index(drop=True)
-
-# Функция для нормализации данных (масштабирование)
-def normalize_data(df, columns, existing_data):
+# Функция для нормализации данных с учетом полного диапазона
+def normalize_data_with_full_range(df, full_data_df, columns):
     df_normalized = df.copy()
     for column in columns:
-        if not existing_data.empty:
-            min_value = min(existing_data[column].min(), df[column].min())
-            max_value = max(existing_data[column].max(), df[column].max())
+        min_value = full_data_df[column].min()
+        max_value = full_data_df[column].max()
+        print(f"Колонка {column}: min = {min_value}, max = {max_value}")  # Для отладки
+        if max_value != min_value:  # Избегаем деления на ноль
+            df_normalized[f'{column}_normalized'] = (df[column] - min_value) / (max_value - min_value)
         else:
-            min_value = df[column].min()
-            max_value = df[column].max()
-        df_normalized[column] = (df[column] - min_value) / (max_value - min_value)
+            df_normalized[f'{column}_normalized'] = 0  # Или другое значение, если min == max
     return df_normalized
 
-# Функция для сохранения объединенных и нормализованных данных обратно в CSV
-def save_merged_data(df, output_filename):
-    output_path = os.path.join('data', output_filename)
+# Запись нормализованных данных в новую таблицу
+def save_normalized_data_to_mysql(connection, normalized_df, interval):
+    sql_insert_query = """
+        INSERT INTO binance_klines_normalized (
+            open_time, open_price_normalized, high_price_normalized, low_price_normalized,
+            close_price_normalized, volume_normalized, close_time, rsi_normalized, macd_normalized,
+            macd_signal_normalized, macd_hist_normalized, sma_20_normalized, ema_20_normalized,
+            upper_bb_normalized, middle_bb_normalized, lower_bb_normalized, obv_normalized, data_interval
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
     
-    # Проверка на существование папки, создание если она отсутствует
-    output_dir = os.path.dirname(output_path)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    df.to_csv(output_path, index=False)
-    print(f'Объединенные данные сохранены в {output_path}')
+    cursor = connection.cursor()
 
-# Пример обработки файлов с прогресс-баром
-def process_data(symbol, intervals, folder_path='periods_data_with_indicators', output_filename='merged_data_with_indicators.csv'):
-    print('Загрузка данных...')
-    existing_data = load_existing_data(f'data/{output_filename}')  # Загружаем уже существующие данные
-    data_dict = load_csv_data(folder_path, symbol, intervals)
-    
-    print('Объединение данных...')
-    merged_data = merge_data(data_dict, existing_data)
-    
-    print('Нормализация данных...')
-    columns_to_normalize = ['Цена открытия', 'Максимум', 'Минимум', 'Цена закрытия', 'Объем', 'RSI', 'MACD', 'SMA_20', 'EMA_20', 'Upper_BB', 'Middle_BB', 'Lower_BB', 'OBV']
-    normalized_data = normalize_data(merged_data, columns_to_normalize, existing_data)
-    
-    print('Сохранение объединенных данных...')
-    save_merged_data(normalized_data, output_filename)
-    split_data_by_time(f'{output_filename}')
+    for _, row in normalized_df.iterrows():
+        if row.isnull().any():
+            continue  # Пропустить строки с отсутствующими данными
+        values = (
+            row['open_time'], row['open_price_normalized'], row['high_price_normalized'],
+            row['low_price_normalized'], row['close_price_normalized'], row['volume_normalized'],
+            row['close_time'], row['rsi_normalized'], row['macd_normalized'], row['macd_signal_normalized'],
+            row['macd_hist_normalized'], row['sma_20_normalized'], row['ema_20_normalized'],
+            row['upper_bb_normalized'], row['middle_bb_normalized'], row['lower_bb_normalized'],
+            row['obv_normalized'], interval
+        )
 
-    with tqdm(total=len(intervals), desc="Обработка данных", unit="файлов") as pbar:
-        for interval in intervals:
-            time.sleep(1)  # Симуляция обработки каждого файла
-            pbar.update(1)
+        cursor.execute(sql_insert_query, values)  # Вставка одной строки за раз
+    
+    connection.commit()
+    cursor.close()
+
+# Основной процесс нормализации
+def process_normalization(interval):
+    connection = connect_to_db()
+    if connection is None:
+        return
+
+    try:
+        start_time = time.time()
+
+        # Получаем все данные для расчета минимальных и максимальных значений
+        full_data = fetch_all_data_for_normalization(connection, interval)
+
+        # Получаем существующие нормализованные данные
+        existing_normalized_data = fetch_existing_normalized_data(connection, interval)
+
+        # Добавляем нормализованные данные к исходным для расчета минимальных и максимальных значений
+        full_data_with_existing = pd.concat([full_data, existing_normalized_data], axis=0)
+        if full_data_with_existing.empty:
+            print(f"Нет данных для интервала {interval}")
+            return
+
+        # Получаем новые данные для нормализации
+        new_data = fetch_new_data(connection, interval)
+        if new_data.empty:
+            print(f"Нет новых данных для нормализации для интервала {interval}")
+            return
+
+        # Нормализуем новые данные с использованием минимальных и максимальных значений на основе полного набора данных
+        normalized_data = normalize_data_with_full_range(new_data, full_data_with_existing, ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 'rsi', 'macd', 'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv'])
         
-        pbar.close()
+        # Сохраняем нормализованные данные в базу данных
+        save_normalized_data_to_mysql(connection, normalized_data, interval)
+
+        end_time = time.time()
+        print(f"Время обработки интервала {interval}: {end_time - start_time} секунд")
     
-    print('Процесс обработки данных завершен.')
+    finally:
+        connection.close()
 
 # Пример использования
 if __name__ == '__main__':
-    symbol = 'BTCUSDT'
-    intervals = ['1M', '1d', '4h', '1h', '15m', '5m', '1m']
-    
-    process_data(symbol, intervals)
+    intervals = ['1m', '5m', '15m', '1h', '4h', '1d']
+    for interval in intervals:
+        process_normalization(interval)
