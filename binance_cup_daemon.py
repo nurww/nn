@@ -1,101 +1,102 @@
+# binance_cup_daemon.py
+
 import asyncio
 import websockets
 import json
-import csv
-from rich.console import Console
-from rich.table import Table
+import mysql.connector
 from datetime import datetime
-import os
-import time
-from rich.live import Live
 
-# Функция форматирования чисел с добавлением K, M, B
-def format_large_number(value):
-    if value >= 1_000_000_000:  # Больше или равно миллиарду
-        return f"{value / 1_000_000_000:.2f}B"
-    elif value >= 1_000_000:  # Больше или равно миллиону
-        return f"{value / 1_000_000:.2f}M"
-    elif value >= 1_000:  # Больше или равно тысяче
-        return f"{value / 1_000:.2f}K"
-    else:
-        return f"{value:.2f}"
+# Буфер для хранения данных за последние 10 секунд
+buffer = []
 
-# Функция для записи данных в CSV
-def save_to_csv(data, filename='data/BTCUSDT_1s.csv'):
-    file_exists = os.path.isfile(filename)
-    with open(filename, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(['Время открытия (UTC)', 'Тип сделки', 'Цена', 'Количество (USDT)', 'Кол-во в USDT'])
-        writer.writerow(data)
+# Функция для сохранения данных в MySQL
+def save_to_db(buffer, connection):
+    try:
+        cursor = connection.cursor()
+        query = """
+            INSERT INTO order_book_data (timestamp, mid_price, sum_bid_volume, sum_ask_volume)
+            VALUES (%s, %s, %s, %s)
+        """
+        cursor.executemany(query, buffer)
+        connection.commit()
+        print(f"Сохранено {len(buffer)} записей в базу данных.")
+    except mysql.connector.Error as e:
+        print(f"Ошибка записи в MySQL: {e}")
+    finally:
+        cursor.close()
+
+# Функция для расчета взвешенной средней цены и дисбаланса объемов
+def calculate_weighted_mid_price(bids, asks):
+    total_bid_weight = sum(float(bid[1]) for bid in bids[:5])
+    total_ask_weight = sum(float(ask[1]) for ask in asks[:5])
+    
+    # Взвешенные средние цены
+    weighted_bid_price = sum(float(bid[0]) * float(bid[1]) for bid in bids[:5]) / total_bid_weight
+    weighted_ask_price = sum(float(ask[0]) * float(ask[1]) for ask in asks[:5]) / total_ask_weight
+
+    # Взвешенная средняя цена
+    weighted_mid_price = (weighted_bid_price + weighted_ask_price) / 2
+
+    # Расчет дисбаланса между покупателями и продавцами
+    imbalance = (total_bid_weight - total_ask_weight) / (total_bid_weight + total_ask_weight)
+    
+    return weighted_mid_price, imbalance
 
 # Асинхронная функция для работы с ордербуком
-async def futures_order_book():
-    console = Console()
+async def analyze_order_book():
     symbol = "btcusdt"
     depth_url = f"wss://fstream.binance.com/ws/{symbol}@depth20@100ms"
-    
+
+    # Подключение к базе данных
+    try:
+        connection = mysql.connector.connect(
+            host='localhost',
+            database='binance_data',
+            user='root',
+            password='root'
+        )
+        print("Соединение с базой данных установлено.")
+    except mysql.connector.Error as e:
+        print(f"Ошибка подключения к MySQL: {e}")
+        return
+
     async with websockets.connect(depth_url) as websocket_depth:
-        with Live(console=console, refresh_per_second=10) as live:  # Настройка живого отображения
-            while True:
-                try:
-                    # Получаем сообщение с ордеров (стакан)
-                    message_depth = await websocket_depth.recv()
-                    data_depth = json.loads(message_depth)
+        while True:
+            try:
+                message_depth = await websocket_depth.recv()
+                data_depth = json.loads(message_depth)
 
-                    bids = data_depth['b']  # Покупка
-                    asks = data_depth['a']  # Продажа
+                bids = data_depth['b']
+                asks = data_depth['a']
 
-                    # Средняя цена между покупками и продажами
-                    mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2
+                # Используем улучшенный анализ
+                weighted_mid_price, imbalance = calculate_weighted_mid_price(bids, asks)
+                sum_bid_volume = sum(float(bid[1]) for bid in bids[:5])
+                sum_ask_volume = sum(float(ask[1]) for ask in asks[:5])
 
-                    # Создаем таблицу для отображения стакана
-                    table = Table(title="Order Book", show_header=True, header_style="bold magenta")
-                    table.add_column("Тип", style="dim", width=12)
-                    table.add_column("Цена (USDT)", justify="right")
-                    table.add_column("Количество (USDT)", justify="right")
-                    table.add_column("Кол-во в USDT", justify="right")
+                # Время записи в формате UTC
+                timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
-                    # Средняя цена между покупками и продажами
-                    table.add_row("------", f"{mid_price:.1f}", "------", "------")
+                # Добавляем данные в буфер
+                buffer.append((timestamp, weighted_mid_price, sum_bid_volume, sum_ask_volume, imbalance))
 
-                    # Текущее время для записи
-                    current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                # Если буфер достиг 100 обновлений
+                if len(buffer) >= 100:
+                    save_to_db(buffer, connection)
+                    buffer.clear()
 
-                    # Вывод заявок на продажу в обратном порядке
-                    for ask in reversed(asks[:5]):
-                        amount_in_usdt = float(ask[1]) * mid_price
-                        table.add_row(
-                            "sell", 
-                            ask[0], 
-                            ask[1], 
-                            format_large_number(amount_in_usdt)
-                        )
-                        save_to_csv([current_time, "sell", ask[0], ask[1], format_large_number(amount_in_usdt)])
+                await asyncio.sleep(0.1)
 
-                    # Вывод заявок на покупку
-                    for bid in bids[:5]:
-                        amount_in_usdt = float(bid[1]) * mid_price
-                        table.add_row(
-                            "buy", 
-                            bid[0], 
-                            bid[1], 
-                            format_large_number(amount_in_usdt)
-                        )
-                        save_to_csv([current_time, "buy", bid[0], bid[1], format_large_number(amount_in_usdt)])
+            except websockets.exceptions.ConnectionClosed:
+                print("Соединение закрыто, пытаемся переподключиться...")
+                await asyncio.sleep(1)
+                continue
 
-                    # Обновляем таблицу без очистки экрана
-                    live.update(table)
+            except Exception as e:
+                print(f"Произошла ошибка: {e}")
+                await asyncio.sleep(1)
 
-                    await asyncio.sleep(0.1)  # Обновляем данные каждые 100 ms
-
-                except websockets.exceptions.ConnectionClosed:
-                    console.print("Соединение закрыто, пытаемся переподключиться...")
-                    time.sleep(0.1)  # Ждем перед переподключением
-
-                except Exception as e:
-                    console.print(f"Произошла ошибка: {e}")
-                    break
+    connection.close()
 
 # Запуск программы
-asyncio.get_event_loop().run_until_complete(futures_order_book())
+asyncio.get_event_loop().run_until_complete(analyze_order_book())

@@ -1,3 +1,5 @@
+# trade_cup.py
+
 import asyncio
 import websockets
 import json

@@ -1,3 +1,5 @@
+#cross_validation.py
+
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
@@ -7,6 +9,9 @@ from datetime import datetime
 import os
 import tqdm
 from sklearn.model_selection import KFold
+import mysql.connector
+from mysql.connector import Error
+
 
 # Функция для сохранения модели
 def save_best_model(model, fold, epoch, loss):
@@ -17,11 +22,21 @@ def save_best_model(model, fold, epoch, loss):
     torch.save(model.state_dict(), model_path)
     print(f"Модель для фолда {fold} сохранена как {model_path}")
 
-# Загрузка данных
-def load_data(file_path):
-    data = pd.read_csv(file_path)
-    X = data[['Цена открытия', 'Максимум', 'Минимум', 'Цена закрытия', 'Объем', 'RSI', 'MACD', 'MACD_signal', 'MACD_hist', 'SMA_20', 'EMA_20', 'Upper_BB', 'Middle_BB', 'Lower_BB', 'OBV']].values
-    y = data['Цена закрытия'].values
+# Функция для загрузки данных из базы данных вместо файла CSV
+def load_data_from_db(connection, table_name, interval):
+    query = f"""
+        SELECT open_price_normalized, high_price_normalized, low_price_normalized, close_price_normalized,
+               volume_normalized, rsi_normalized, macd_normalized, macd_signal_normalized, macd_hist_normalized,
+               sma_20_normalized, ema_20_normalized, upper_bb_normalized, middle_bb_normalized, lower_bb_normalized, obv_normalized
+        FROM {table_name}
+        WHERE data_interval = '{interval}'
+    """
+    df = pd.read_sql(query, connection)
+    
+    X = df[['open_price_normalized', 'high_price_normalized', 'low_price_normalized', 'close_price_normalized', 
+            'volume_normalized', 'rsi_normalized', 'macd_normalized', 'macd_signal_normalized', 'macd_hist_normalized', 
+            'sma_20_normalized', 'ema_20_normalized', 'upper_bb_normalized', 'middle_bb_normalized', 'lower_bb_normalized', 'obv_normalized']].values
+    y = df['close_price_normalized'].values  # Прогнозируем значение цены закрытия
     return X, y
 
 # Функция обучения модели
@@ -66,9 +81,12 @@ def evaluate_model(model, test_loader, criterion, device):
     return avg_loss
 
 # Функция для кросс-валидации
-def cross_validate(X, y, n_splits=5, epochs=10):
+def cross_validate(connection, table_name, interval, n_splits=5, epochs=10, best_params=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Используемое устройство: {device}")
+
+    # Загрузка данных из базы данных
+    X, y = load_data_from_db(connection, table_name, interval)
     
     kf = KFold(n_splits=n_splits)
     
@@ -116,8 +134,8 @@ def cross_validate(X, y, n_splits=5, epochs=10):
 
         fold += 1
 
-    # Загрузка глобальных тестовых данных для финальной проверки (опционально)
-    X_test_global, y_test_global = load_data('data/test_data_with_indicators.csv')
+    # Финальная проверка на глобальных данных (опционально)
+    X_test_global, y_test_global = load_data_from_db(connection, table_name, interval)
     X_test_tensor_global = torch.tensor(X_test_global, dtype=torch.float32).to(device)
     y_test_tensor_global = torch.tensor(y_test_global, dtype=torch.float32).view(-1, 1).to(device)
 
@@ -128,11 +146,6 @@ def cross_validate(X, y, n_splits=5, epochs=10):
 
 
 if __name__ == '__main__':
-    # Загрузка данных
-    data = pd.read_csv('data/train_data_with_indicators.csv')
-    X = data[['Цена открытия', 'Максимум', 'Минимум', 'Цена закрытия', 'Объем', 'RSI', 'MACD', 'MACD_signal', 'MACD_hist', 'SMA_20', 'EMA_20', 'Upper_BB', 'Middle_BB', 'Lower_BB', 'OBV']].values
-    y = data['Цена закрытия'].values
-
     # Оптимальные параметры, найденные Optuna
     best_params = {
         'hidden_size': 153,
@@ -143,5 +156,22 @@ if __name__ == '__main__':
         'accumulation_steps': 2
     }
 
-    # Запуск кросс-валидации
-    cross_validate(X, y, n_splits=5, epochs=10)
+    # Подключение к базе данных
+    try:
+        connection = mysql.connector.connect(
+            host='localhost',
+            database='binance_data',
+            user='root',
+            password='root'
+        )
+        
+        # Запуск кросс-валидации
+        cross_validate(connection, 'binance_klines_normalized', '1m', n_splits=5, epochs=10, best_params=best_params)
+    
+    except Error as e:
+        print(f"Ошибка подключения к MySQL: {e}")
+    
+    finally:
+        if connection.is_connected():
+            connection.close()
+            print("Соединение с MySQL закрыто")
