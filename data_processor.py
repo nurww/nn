@@ -174,9 +174,6 @@ def check_and_update_window(connection, interval, df, current_window):
                     'lower_bb', 'obv']
     )
 
-
-    print(new_extremes_found)
-
     # Если найдены новые экстремумы, создаем новое окно
     if new_extremes_found:
         print("Найдено значение за пределами текущего окна. Создание нового окна.")

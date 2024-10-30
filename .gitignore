@@ -6,3 +6,4 @@ saved_models_with_indicators/
 copies_for_trading/
 __pycache__
 logs/
+.txt

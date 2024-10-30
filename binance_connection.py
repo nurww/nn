@@ -47,22 +47,23 @@ async def get_binance_data(session, symbol, interval, start_time, limit=1000):
 
     time_to_wait = (next_execution_time - datetime.utcnow()).total_seconds()
     print(f"Ждем до 5-й секунды: {next_execution_time} (ожидание {time_to_wait:.2f} секунд)")
+    print(int(current_time.timestamp() * 1000))
     await asyncio.sleep(time_to_wait)
     print(f"- {interval} запрос на Binance в {datetime.utcnow()}")
 
     # Определяем endTime для завершенного интервала
     if interval == "1m":
-        end_time = int((current_time - timedelta(minutes=1)).timestamp() * 1000)
+        end_time = int((current_time - timedelta(minutes=1) + timedelta(hours=5)).timestamp() * 1000)
     elif interval == "5m":
-        end_time = int((current_time - timedelta(minutes=current_time.minute % 5 or 5)).timestamp() * 1000)
+        end_time = int((current_time - timedelta(minutes=current_time.minute % 5 or 5) + timedelta(hours=5)).timestamp() * 1000)
     elif interval == "15m":
-        end_time = int((current_time - timedelta(minutes=current_time.minute % 15 or 15)).timestamp() * 1000)
+        end_time = int((current_time - timedelta(minutes=current_time.minute % 15 or 15) + timedelta(hours=5)).timestamp() * 1000)
     elif interval == "1h":
-        end_time = int((current_time - timedelta(hours=1)).timestamp() * 1000)
+        end_time = int((current_time - timedelta(hours=1) + timedelta(hours=5)).timestamp() * 1000)
     elif interval == "4h":
-        end_time = int((current_time - timedelta(hours=current_time.hour % 4 or 4)).timestamp() * 1000)
+        end_time = int((current_time - timedelta(hours=current_time.hour % 4 or 4) + timedelta(hours=5)).timestamp() * 1000)
     elif interval == "1d":
-        end_time = int((current_time - timedelta(days=1)).timestamp() * 1000)
+        end_time = int((current_time - timedelta(days=1) + timedelta(hours=5)).timestamp() * 1000)
     else:
         end_time = current_time.timestamp() * 1000
         # raise ValueError("Неподдерживаемый интервал")
@@ -84,7 +85,7 @@ async def get_binance_data(session, symbol, interval, start_time, limit=1000):
                     raise Exception(f"Ошибка при получении данных: {response.status}")
 
                 data = await response.json()
-                print(f"Полученные данные для {interval} (end_time: {end_time}):")
+                print(f"current_time: {current_time} | Полученные данные для {interval} (end_time: {datetime.utcfromtimestamp(end_time / 1000)}):")
                 format_and_print_data(data)  # Выводим данные в виде таблицы
                 return data
 
