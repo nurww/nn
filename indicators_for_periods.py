@@ -193,4 +193,8 @@ async def main():
 
 # Запуск программы
 if __name__ == '__main__':
+    print("\n")
+    print("_____________# indicators_for_periods.py")
     asyncio.run(main())
+    print("\n")
+    print("__________________________||||||||")

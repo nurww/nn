@@ -1,9 +1,10 @@
+# binance_connection.py
+
 import argparse
 import aiohttp
 import asyncio
 import mysql.connector
 from mysql.connector import Error
-from tqdm import tqdm
 from datetime import datetime, timezone, timedelta
 
 # Семафор для ограничения параллельных запросов
@@ -25,20 +26,67 @@ def connect_to_db():
         print(f"Ошибка при подключении к MySQL: {e}")
         return None
 
+# Форматирование и вывод данных в виде таблицы
+def format_and_print_data(data):
+    return 
+    # print("open_time (UTC)        | open_time (UTC+5)     | open_price | high_price | low_price | close_price | volume")
+    # print("-" * 90)
+    # for entry in data:
+    #     open_time_utc = datetime.fromtimestamp(entry[0] / 1000, tz=timezone.utc)
+    #     open_time_utc5 = open_time_utc + timedelta(hours=5)
+    #     print(f"{open_time_utc.strftime('%Y-%m-%d %H:%M:%S')} | "
+    #           f"{open_time_utc5.strftime('%Y-%m-%d %H:%M:%S')} | "
+    #           f"{entry[1]} | {entry[2]} | {entry[3]} | {entry[4]} | {entry[5]}")
+
 # Получение данных с Binance
 async def get_binance_data(session, symbol, interval, start_time, limit=1000):
-    async with semaphore:
-        url = 'https://fapi.binance.com/fapi/v1/klines'
-        params = {
-            'symbol': symbol,
-            'interval': interval,
-            'startTime': start_time,
-            'limit': limit
-        }
-        async with session.get(url, params=params) as response:
-            if response.status != 200:
-                raise Exception(f"Ошибка при получении данных: {response.status}")
-            return await response.json()
+    current_time = datetime.utcnow()
+    next_execution_time = current_time.replace(second=5, microsecond=0)
+    if current_time.second >= 5:
+        next_execution_time += timedelta(minutes=0)
+
+    time_to_wait = (next_execution_time - datetime.utcnow()).total_seconds()
+    print(f"Ждем до 5-й секунды: {next_execution_time} (ожидание {time_to_wait:.2f} секунд)")
+    await asyncio.sleep(time_to_wait)
+    print(f"- {interval} запрос на Binance в {datetime.utcnow()}")
+
+    # Определяем endTime для завершенного интервала
+    if interval == "1m":
+        end_time = int((current_time - timedelta(minutes=1)).timestamp() * 1000)
+    elif interval == "5m":
+        end_time = int((current_time - timedelta(minutes=current_time.minute % 5 or 5)).timestamp() * 1000)
+    elif interval == "15m":
+        end_time = int((current_time - timedelta(minutes=current_time.minute % 15 or 15)).timestamp() * 1000)
+    elif interval == "1h":
+        end_time = int((current_time - timedelta(hours=1)).timestamp() * 1000)
+    elif interval == "4h":
+        end_time = int((current_time - timedelta(hours=current_time.hour % 4 or 4)).timestamp() * 1000)
+    elif interval == "1d":
+        end_time = int((current_time - timedelta(days=1)).timestamp() * 1000)
+    else:
+        end_time = current_time.timestamp() * 1000
+        # raise ValueError("Неподдерживаемый интервал")
+
+    if start_time >= end_time:
+        print(f"Пропускаем загрузку для {interval}, данные актуальны.")
+    else:
+        async with semaphore:
+            url = 'https://fapi.binance.com/fapi/v1/klines'
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'startTime': start_time,
+                'endTime': end_time,
+                'limit': limit
+            }
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    raise Exception(f"Ошибка при получении данных: {response.status}")
+
+                data = await response.json()
+                print(f"Полученные данные для {interval} (end_time: {end_time}):")
+                format_and_print_data(data)  # Выводим данные в виде таблицы
+                return data
 
 # Проверка на допустимое время для загрузки данных
 def is_time_to_fetch(interval, force):
@@ -47,21 +95,26 @@ def is_time_to_fetch(interval, force):
         return True
     
     now = datetime.utcnow()
-    if interval == '1d' and not (now.hour == 23 and now.minute == 50 and now.second >= 50):
-        print("Ещё рано для загрузки данных за 1 день. Ждем 23:59:57 UTC.")
+
+    if interval == '1d' and not (now.minute % 15 == 0 and now.second >= 5 and now.microsecond >= 0):
+        print("Ещё рано для загрузки данных за 1 день. Ждем 00:05, 15:05, 30:05, 45:05 и т.д.")
         return False
-    elif interval == '4h' and not (now.hour % 4 == 3 and now.minute == 59 and now.second >= 50):
-        print("Ещё рано для загрузки данных за 4 часа. Ждем 03:59:50, 07:59:50 и т.д.")
+    elif interval == '4h' and not (now.minute % 15 == 0 and now.second >= 5 and now.microsecond >= 0):
+        print("Ещё рано для загрузки данных за 4 часа. Ждем 00:05, 15:05, 30:05, 45:05 и т.д.")
         return False
-    elif interval == '1h' and not (now.minute == 59 and now.second >= 50):
-        print("Ещё рано для загрузки данных за 1 час. Ждем 59 минут и 50 секунд.")
+    elif interval == '1h' and not (now.minute % 15 == 0 and now.second >= 5 and now.microsecond >= 0):
+        print("Ещё рано для загрузки данных за 1 час. Ждем 00:05, 15:05, 30:05, 45:05 и т.д.")
         return False
-    elif interval == '15m' and not (now.minute % 15 == 14 and now.second >= 50):
-        print("Ещё рано для загрузки данных за 15 минут. Ждем 14 минут и 50 секунд в каждом 15-минутном интервале.")
+    elif interval == '15m' and not (now.minute % 15 == 0 and now.second >= 5 and now.microsecond >= 0):
+        print("Ещё рано для загрузки данных за 15 минут. Ждем 00:05, 15:05, 30:05, 45:05 и т.д.")
         return False
-    elif interval == '5m' and not (now.minute % 5 == 4 and now.second >= 50):
-        print("Ещё рано для загрузки данных за 5 минут. Ждем 4 минуты и 50 секунд в каждом 5-минутном интервале.")
+    elif interval == '5m' and not (now.minute % 5 == 0 and now.second >= 5 and now.microsecond >= 0):
+        print("Ещё рано для загрузки данных за 5 минут. Ждем 00:05, 05:05, 10:05 и т.д.")
         return False
+    elif interval == '1m' and not (now.second >= 5 and now.microsecond >= 0):
+        print("Ещё рано для загрузки данных за 1 минуту. Ждем 00:05 каждой минуты.")
+        return False
+    
     return True
 
 # Запись данных в MySQL
@@ -103,53 +156,23 @@ def get_last_timestamp_from_db(connection, data_interval):
         return None
     return int(result[0].timestamp() * 1000)
 
-# Проверка на дубликаты
-def check_for_duplicates(connection):
-    cursor = connection.cursor()
-    query = """
-    SELECT open_time, data_interval, COUNT(*)
-    FROM binance_klines
-    GROUP BY open_time, data_interval
-    HAVING COUNT(*) > 1;
-    """
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    if rows:
-        print("Дубликаты найдены:")
-        for row in rows:
-            print(f"open_time: {row[0]}, interval: {row[1]}, количество: {row[2]}")
-    else:
-        print("Дубликатов не найдено.")
-
-# Проверка на пропуски данных
-def check_for_gaps(connection, data_interval):
-    cursor = connection.cursor()
-    cursor.execute(f"SELECT open_time FROM binance_klines WHERE data_interval = '{data_interval}' ORDER BY open_time")
-    rows = cursor.fetchall()
-    if len(rows) < 2:
-        print(f"Недостаточно данных для проверки интервала {data_interval}")
-        return
-    expected_diff = {
-        '1m': timedelta(minutes=1),
-        '5m': timedelta(minutes=5),
-        '15m': timedelta(minutes=15),
-        '1h': timedelta(hours=1),
-        '4h': timedelta(hours=4),
-        '1d': timedelta(days=1),
-    }
-    previous_time = rows[0][0]
-    for row in rows[1:]:
-        current_time = row[0]
-        if expected_diff[data_interval] is not None:
-            if current_time - previous_time > expected_diff[data_interval]:
-                print(f"Пропущенные данные между {previous_time} и {current_time} для интервала {data_interval}")
-        previous_time = current_time
-
 # Постоянная загрузка данных с проверкой допустимого времени
 async def fetch_and_store_data_with_timing(session, connection, symbol, interval, start_time, force):
     if is_time_to_fetch(interval, force):
-        data = await get_binance_data(session, symbol, interval, start_time)
-        save_to_mysql(connection, data, interval)
+        while True:
+            data = await get_binance_data(session, symbol, interval, start_time)
+            
+            if not data:
+                print(f"Данные для {interval} завершены на временной метке {start_time}.")
+                break  # Если данных больше нет, выходим из цикла
+
+            save_to_mysql(connection, data, interval)
+            
+            last_timestamp = data[-1][0]
+            start_time = last_timestamp + 1
+
+            if len(data) < 1000:
+                break
     else:
         print(f"Пропускаем загрузку для интервала {interval}, время еще не наступило.")
 
@@ -167,9 +190,6 @@ async def continuous_data_fetch(symbol, intervals, year, force):
             await asyncio.gather(*tasks)
     finally:
         if connection.is_connected():
-            for interval in intervals:
-                check_for_duplicates(connection)
-                check_for_gaps(connection, interval)
             connection.close()
             print("Соединение с MySQL закрыто")
 
@@ -185,4 +205,8 @@ if __name__ == "__main__":
     symbol = 'BTCUSDT'
     intervals = ['1m', '5m', '15m', '1h', '4h', '1d']
     year = 2024
+    print("\n")
+    print("_____________# binance_connection.py")
     asyncio.run(continuous_data_fetch(symbol, intervals, year, args.force))
+    print("\n")
+    print("__________________________||||||||")

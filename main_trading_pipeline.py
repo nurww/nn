@@ -52,6 +52,25 @@ def run_script_with_retries_and_timing(script_name, max_retries=3, timeout=50):
     logging.error(f"{script_name} не удалось запустить после {max_retries} попыток.")
     return False
 
+# Функция для запуска скрипта без тайм-аута и повторных попыток
+def run_script(script_name):
+    logging.info(f"Запуск {script_name} без тайм-аута")
+    start_time = time.time()
+    try:
+        process = subprocess.run(['python', script_name])
+        elapsed_time = time.time() - start_time
+        logging.info(f"Время выполнения {script_name}: {elapsed_time:.2f} секунд")
+
+        if process.returncode == 0:
+            logging.info(f"{script_name} завершен успешно.")
+            return True
+        else:
+            logging.error(f"{script_name} завершился с ошибкой.")
+            return False
+    except Exception as e:
+        logging.error(f"Ошибка при выполнении {script_name}: {e}")
+        return False
+
 # Основной процесс обработки данных
 def main_process():
     global should_stop
@@ -62,23 +81,23 @@ def main_process():
     while not should_stop:
         current_time = datetime.utcnow()
         
-        # Рассчитываем момент 51-й секунды текущей или следующей минуты
-        next_execution_time = current_time.replace(second=51, microsecond=0)
-        if current_time.second >= 51:
+        # Рассчитываем момент 4-й секунды текущей или следующей минуты
+        next_execution_time = current_time.replace(second=4, microsecond=0)
+        if current_time.second >= 4:
             next_execution_time += timedelta(minutes=1)
         
         time_to_wait = (next_execution_time - datetime.utcnow()).total_seconds()
-        logging.info(f"Ждем до 51-й секунды: {next_execution_time} (ожидание {time_to_wait:.2f} секунд)")
+        logging.info(f"Ждем до 4-й секунды: {next_execution_time} (ожидание {time_to_wait:.2f} секунд)")
         time.sleep(time_to_wait)
 
         logging.info(f"Начало цикла обработки данных: {next_execution_time}")
 
         cycle_start_time = time.time()
 
-        # Запускаем скрипты по очереди
-        if run_script_with_retries_and_timing('binance_connection.py'):
-            if run_script_with_retries_and_timing('indicators_for_periods.py'):
-                if run_script_with_retries_and_timing('data_processor.py'):
+        # Запускаем скрипты по очереди без тайм-аутов
+        if run_script('binance_connection.py'):
+            if run_script('indicators_for_periods.py'):
+                if run_script('data_processor.py'):
                     logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
                 else:
                     logging.error(f"Ошибка при выполнении data_processor.py за {next_execution_time}")

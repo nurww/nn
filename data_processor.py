@@ -25,6 +25,10 @@ def connect_to_db():
 # Функция для создания нового окна и деактивации старых
 def create_new_window(connection, interval, min_max_values, start_time, end_time):
     deactivate_windows(connection, interval)
+    
+    # Задаем min_volume равным 0, чтобы исключить ошибочные создания окон
+    min_max_values['min_volume'] = 0
+
     last_window = get_last_window(connection, interval)
     if last_window and start_time <= last_window['end_time']:
         start_time = last_window['end_time'] + timedelta(seconds=1)
@@ -158,14 +162,18 @@ def check_and_update_window(connection, interval, df, current_window):
 
     # Проверка значений, выходящих за пределы текущих min/max, с учетом равенства
     new_extremes_found = any(
-        (min_max_values[f'min_{column}'] < current_window.get(f'min_{column}', float('inf')) or 
-        min_max_values[f'max_{column}'] > current_window.get(f'max_{column}', float('-inf')))
-        and not (min_max_values[f'min_{column}'] == current_window.get(f'min_{column}', float('inf')) and 
-                min_max_values[f'max_{column}'] == current_window.get(f'max_{column}', float('-inf')))
+        (
+            (min_max_values[f'min_{column}'] < current_window.get(f'min_{column}', 0) if column != 'volume' else False) or
+            (min_max_values[f'max_{column}'] > current_window.get(f'max_{column}', float('-inf')))
+        ) and not (
+            min_max_values[f'min_{column}'] == current_window.get(f'min_{column}', 0) and
+            min_max_values[f'max_{column}'] == current_window.get(f'max_{column}', float('-inf'))
+        )
         for column in ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 'rsi', 'macd', 
                     'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 
                     'lower_bb', 'obv']
     )
+
 
     print(new_extremes_found)
 
@@ -355,9 +363,13 @@ def process_normalization_with_windows(interval):
 
 # Запуск основной функции для каждого интервала
 def main():
+    print("\n")
+    print("_____________# data_processor.py")
     intervals = ['1m', '5m', '15m', '1h', '4h', '1d']
     for interval in intervals:
         process_normalization_with_windows(interval)
+    print("\n")
+    print("__________________________||||||||")
 
 if __name__ == '__main__':
     main()
