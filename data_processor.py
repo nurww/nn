@@ -28,6 +28,10 @@ def create_new_window(connection, interval, min_max_values, start_time, end_time
     
     # Задаем min_volume равным 0, чтобы исключить ошибочные создания окон
     min_max_values['min_volume'] = 0
+    min_max_values['min_open_price'] = 0
+    min_max_values['min_high_price'] = 0
+    min_max_values['min_low_price'] = 0
+    min_max_values['min_close_price'] = 0
 
     last_window = get_last_window(connection, interval)
     if last_window and start_time <= last_window['end_time']:
@@ -144,6 +148,26 @@ def update_min_max_stats_for_window(df):
     }
     return min_max_values
 
+# Функция для обновления min_max значений, обновляя только отличающиеся
+def update_min_max_values(min_max_values, current_window):
+    updated_min_max_values = {}
+
+    for column in ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 'rsi', 'macd', 
+                   'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 
+                   'lower_bb', 'obv']:
+        
+        # Проверка для минимального значения
+        min_key = f'min_{column}'
+        if min_max_values[min_key] < current_window.get(min_key, 0):
+            updated_min_max_values[min_key] = min_max_values[min_key]
+        
+        # Проверка для максимального значения
+        max_key = f'max_{column}'
+        if min_max_values[max_key] > current_window.get(max_key, float('-inf')):
+            updated_min_max_values[max_key] = min_max_values[max_key]
+
+    return updated_min_max_values
+
 # Функция для проверки, нужно ли создать новое окно или обновить текущее
 def check_and_update_window(connection, interval, df, current_window):
     # Обновляем статистику min/max по данным из df
@@ -177,8 +201,12 @@ def check_and_update_window(connection, interval, df, current_window):
     # Если найдены новые экстремумы, создаем новое окно
     if new_extremes_found:
         print("Найдено значение за пределами текущего окна. Создание нового окна.")
+
+        # Обновляем только измененные значения
+        updated_values = update_min_max_values(min_max_values, current_window)
+                                           
         window_id = create_new_window(
-            connection, interval, min_max_values,
+            connection, interval, updated_values,
             start_time=df['open_time'].min(),
             end_time=df['open_time'].max()
         )

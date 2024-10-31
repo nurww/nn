@@ -47,7 +47,6 @@ async def get_binance_data(session, symbol, interval, start_time, limit=1000):
 
     time_to_wait = (next_execution_time - datetime.utcnow()).total_seconds()
     print(f"Ждем до 5-й секунды: {next_execution_time} (ожидание {time_to_wait:.2f} секунд)")
-    print(int(current_time.timestamp() * 1000))
     await asyncio.sleep(time_to_wait)
     print(f"- {interval} запрос на Binance в {datetime.utcnow()}")
 
