@@ -7,3 +7,4 @@ copies_for_trading/
 __pycache__
 logs/
 .txt
+.log

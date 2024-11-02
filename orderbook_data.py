@@ -3,142 +3,117 @@
 import asyncio
 import websockets
 import json
-import redis
-from datetime import datetime, timedelta
-import mysql.connector
-from mysql.connector import pooling
+import redis.asyncio as aioredis  # Асинхронная версия библиотеки redis-py
+from datetime import datetime
+import numpy as np
 import logging
+import time
+import psutil  # Для мониторинга ресурсов
+from config import REDIS_CONFIG, FIXED_BOUNDARIES
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(
+    filename='logs/normalized_order_book_detailed.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    encoding='utf-8'
+)
 
-# Параметры для подключения к Redis и MySQL
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+# Настройка асинхронного подключения к Redis
+async def initialize_redis():
+    return aioredis.from_url(f"redis://{REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}", db=REDIS_CONFIG['db'])
 
-MYSQL_CONFIG = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': 'root',
-    'database': 'binance_data',
-    'pool_name': 'mysql_pool',
-    'pool_size': 5
-}
-
-try:
-    mysql_pool = pooling.MySQLConnectionPool(**MYSQL_CONFIG)
-except mysql.connector.Error as e:
-    logging.error(f"Ошибка при создании пула MySQL: {e}")
-    exit(1)
+# Функция для нормализации данных с фиксированными границами
+def min_max_normalize(values, min_val, max_val):
+    normalized = (values - min_val) / (max_val - min_val)
+    normalized = np.clip(normalized, 0, 1)  # Ограничение значений между 0 и 1
+    return normalized
 
 # Функция для сохранения данных в Redis
-async def save_to_redis(data):
-    redis_client.rpush("order_book_stream", json.dumps(data))
-    # Оставляем только последние 600 записей
-    redis_client.ltrim("order_book_stream", -600, -1)
-
-# Функция для сохранения агрегированных данных в MySQL
-def save_to_mysql_price_levels(aggregated_data):
-    connection = mysql_pool.get_connection()
+async def save_to_redis(redis_client, data):
     try:
-        cursor = connection.cursor()
-        query = """
-            INSERT INTO price_volume_levels (price, total_volume, side, avg_volume, activity_indicator, last_update)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                total_volume = VALUES(total_volume),
-                avg_volume = VALUES(avg_volume),
-                activity_indicator = VALUES(activity_indicator),
-                last_update = VALUES(last_update)
-        """
-        cursor.executemany(query, aggregated_data)
-        connection.commit()
-        logging.info(f"{len(aggregated_data)} уровней цены обновлено в MySQL")
-    except mysql.connector.Error as e:
-        logging.error(f"Ошибка при записи в MySQL: {e}")
-    finally:
-        cursor.close()
-        connection.close()
+        await redis_client.rpush("normalized_order_book_stream", json.dumps(data))
+        await redis_client.ltrim("normalized_order_book_stream", -1500, -1)
+        logging.info(f"Нормализованные данные записаны в Redis: {data}")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении в Redis: {e}")
 
-# Функция для получения данных ордербука и их обработки
-async def analyze_order_book():
+# Функция для мониторинга ресурсов
+def log_resource_usage():
+    memory = psutil.virtual_memory().percent
+    cpu = psutil.cpu_percent(interval=0.1)
+    logging.info(f"Использование ресурсов: Память {memory}%, CPU {cpu}%")
+
+# Обработка данных ордербука и нормализация
+async def analyze_order_book(redis_client):
     symbol = "btcusdt"
     depth_url = f"wss://fstream.binance.com/ws/{symbol}@depth20@100ms"
 
-    async with websockets.connect(depth_url) as websocket:
-        while True:
-            message = await websocket.recv()
-            data = json.loads(message)
-            bids = data['b']
-            asks = data['a']
-            
-            # Расчет параметров для каждого уровня цены
-            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-            processed_data = []
-
-            for side, levels in (("bid", bids[:8]), ("ask", asks[:8])):
-                for price, volume in levels:
-                    processed_data.append({
-                        "timestamp": timestamp,
-                        "price": float(price),
-                        "volume": float(volume),
-                        "side": side
-                    })
-
-            # Сохранение обработанных данных в Redis
-            await save_to_redis(processed_data)
-
-            # Задержка на 100 мс
-            await asyncio.sleep(0.1)
-
-# Функция для периодической агрегации данных из Redis и записи в MySQL
-async def aggregate_and_save_to_mysql(interval=2):
     while True:
-        # Получение всех данных из Redis
-        order_book_data = [json.loads(item) for item in redis_client.lrange("order_book_stream", 0, -1)]
-        
-        # Агрегация данных для каждого уровня цены
-        aggregated_data = {}
-        
-        for update in order_book_data:
-            for entry in update:
-                price = entry['price']
-                side = entry['side']
-                volume = entry['volume']
-                
-                if (price, side) not in aggregated_data:
-                    aggregated_data[(price, side)] = {
-                        "total_volume": 0,
-                        "count": 0
-                    }
-                
-                aggregated_data[(price, side)]['total_volume'] += volume
-                aggregated_data[(price, side)]['count'] += 1
+        try:
+            async with websockets.connect(depth_url, ping_interval=None) as websocket:
+                logging.info(f"Подключение к WebSocket для {symbol} установлено.")
+                while True:
+                    try:
+                        start_time = time.time()
+                        message = await websocket.recv()
+                        data_received_time = time.time()
 
-        # Подготовка данных для записи в MySQL
-        mysql_data = []
-        for (price, side), data in aggregated_data.items():
-            avg_volume = data['total_volume'] / data['count']
-            activity_indicator = data['count'] / len(order_book_data)
-            last_update = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-            mysql_data.append((price, data['total_volume'], side, avg_volume, activity_indicator, last_update))
-        
-        # Сохранение агрегированных данных в MySQL
-        save_to_mysql_price_levels(mysql_data)
+                        data = json.loads(message)
+                        bids = np.array(data['b'][:8], dtype=float)
+                        asks = np.array(data['a'][:8], dtype=float)
+                        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # UTC время с миллисекундами
 
-        # Задержка перед следующей агрегацией
-        await asyncio.sleep(interval)
+                        # Расчет mid_price и объемов с использованием numpy
+                        mid_price = (bids[0, 0] + asks[0, 0]) / 2
+                        sum_bid_volume = np.sum(bids[:, 1])
+                        sum_ask_volume = np.sum(asks[:, 1])
+                        imbalance = (sum_bid_volume - sum_ask_volume) / (sum_bid_volume + sum_ask_volume) if (sum_bid_volume + sum_ask_volume) > 0 else 0
 
-# Основная функция запуска всех задач
+                        # Логирование времени между этапами
+                        processing_start_time = time.time()
+                        time_diff_receiving_to_processing = processing_start_time - data_received_time
+                        utc_time_received = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+                        logging.info(f"Данные получены в {utc_time_received}. Разница между получением и обработкой: {time_diff_receiving_to_processing:.3f} сек")
+
+                        # Нормализация данных с использованием numpy
+                        normalized_data = {
+                            "timestamp": timestamp,
+                            "mid_price": min_max_normalize(mid_price, FIXED_BOUNDARIES["mid_price"]["min"], FIXED_BOUNDARIES["mid_price"]["max"]),
+                            "sum_bid_volume": min_max_normalize(sum_bid_volume, FIXED_BOUNDARIES["sum_bid_volume"]["min"], FIXED_BOUNDARIES["sum_bid_volume"]["max"]),
+                            "sum_ask_volume": min_max_normalize(sum_ask_volume, FIXED_BOUNDARIES["sum_ask_volume"]["min"], FIXED_BOUNDARIES["sum_ask_volume"]["max"]),
+                            "imbalance": min_max_normalize(imbalance, FIXED_BOUNDARIES["imbalance"]["min"], FIXED_BOUNDARIES["imbalance"]["max"])
+                        }
+
+                        # Сохранение нормализованных данных в Redis
+                        await save_to_redis(redis_client, normalized_data)
+
+                        # Логирование времени завершения обработки
+                        end_time = time.time()
+                        time_diff_processing_to_end = end_time - processing_start_time
+                        utc_time_processing_done = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+                        logging.info(f"Обработка завершена в {utc_time_processing_done}. Время обработки: {time_diff_processing_to_end:.3f} сек")
+
+                        # Логирование использования ресурсов
+                        log_resource_usage()
+
+                        await asyncio.sleep(0.1)
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logging.error(f"Ошибка при обработке данных: {e}")
+                    except Exception as e:
+                        logging.error(f"Неизвестная ошибка: {e}")
+        except (websockets.exceptions.ConnectionClosedError, asyncio.TimeoutError) as e:
+            logging.error(f"Ошибка соединения WebSocket: {e}. Повторное подключение...")
+            await asyncio.sleep(5)  # Ожидание перед повторным подключением
+
+# Основной цикл для запуска обработки
 async def main():
-    # Запускаем две задачи параллельно: сбор данных ордербука и агрегацию
-    await asyncio.gather(
-        analyze_order_book(),
-        aggregate_and_save_to_mysql()
-    )
+    redis_client = await initialize_redis()  # Подготовка Redis перед запуском
+    await analyze_order_book(redis_client)
+    await redis_client.close()
 
-# Запуск программы
+# Запуск обработки ордербука
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Программа остановлена пользователем")
+    asyncio.run(main())
