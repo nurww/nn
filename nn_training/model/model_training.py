@@ -5,7 +5,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from data_processing.fetch_data import fetch_data_from_redis
+from nn_processor.nn_training.data_processing.fetch_data import fetch_data_from_redis
+from nn_processor.nn_training.data_processing.process_data import process_data
+from datetime import datetime
 
 # Определение LSTM модели
 class LSTMModel(nn.Module):
@@ -21,14 +23,20 @@ class LSTMModel(nn.Module):
 
 # Функция для обучения модели
 def train_model(data):
-    # Подготовка данных
-    X = np.column_stack([
-        data['mid_prices'],
-        data['moving_average'],
-        data['bid_volumes'],
-        data['ask_volumes'],
-        data['imbalances']
-    ])
+    print(f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - start time")
+
+    min_length = min(len(data['mid_prices']), len(data['moving_average']), len(data['bid_volumes']), 
+                 len(data['ask_volumes']), len(data['imbalances']))
+
+    # Обрезка массивов до минимальной длины
+    mid_prices = data['mid_prices'][:min_length]
+    moving_average = data['moving_average'][:min_length]
+    bid_volumes = data['bid_volumes'][:min_length]
+    ask_volumes = data['ask_volumes'][:min_length]
+    imbalances = data['imbalances'][:min_length]
+
+    # Объединение массивов
+    X = np.column_stack([mid_prices, moving_average, bid_volumes, ask_volumes, imbalances])
     y = data['mid_prices']  # Пример меток (может быть изменено на нужные данные)
 
     # Преобразование данных для использования в LSTM
@@ -56,7 +64,7 @@ def train_model(data):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Обучение модели
-    num_epochs = 50
+    num_epochs = 1
     for epoch in range(num_epochs):
         model.train()
         for batch_X, batch_y in train_loader:
@@ -78,12 +86,15 @@ def train_model(data):
             total_loss += loss.item()
 
     print(f'Средняя ошибка на тестовой выборке: {total_loss / len(test_loader):.4f}')
+    print(f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - before model save time")
 
     # Сохранение модели
     torch.save(model.state_dict(), 'model/lstm_model.pth')
     print("Модель сохранена!")
+    print(f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - end time")
 
 # Запуск обучения
 if __name__ == "__main__":
     data = asyncio.run(fetch_data_from_redis())  # Загрузка данных из Redis
-    train_model(data)
+    processed_data = process_data(data)
+    train_model(processed_data)
