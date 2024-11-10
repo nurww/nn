@@ -7,8 +7,7 @@ import redis.asyncio as aioredis  # Асинхронная версия библ
 from datetime import datetime
 import numpy as np
 import logging
-import time
-import psutil  # Для мониторинга ресурсов
+import os
 
 # Конфигурация для Redis
 REDIS_CONFIG = {
@@ -18,7 +17,7 @@ REDIS_CONFIG = {
 }
 
 FIXED_BOUNDARIES = {
-    "mid_price": {"min": 40000, "max": 85000},
+    "mid_price": {"min": 20000, "max": 90000},
     "sum_bid_volume": {"min": 0, "max": 15000},
     "sum_ask_volume": {"min": 0, "max": 15000},
     "imbalance": {"min": -1, "max": 1}
@@ -45,58 +44,55 @@ def min_max_normalize(values, min_val, max_val):
 # Функция для сохранения данных в Redis
 async def save_to_redis(redis_client, data):
     try:
-        # Сохранение данных в ключ normalized_order_book_stream
         await redis_client.rpush("normalized_order_book_stream", json.dumps(data))
         await redis_client.ltrim("normalized_order_book_stream", -1500, -1)
-        
-        # Сохранение данных в новый ключ normalized_order_book_stream_history
-        # await redis_client.rpush("normalized_order_book_stream_history", json.dumps(data))
-        # await redis_client.ltrim("normalized_order_book_stream_history", -10000, -1)  # Ограничение размера истории
-
-        # logging.info(f"Нормализованные данные записаны в Redis: {data}")
     except Exception as e:
         logging.error(f"Ошибка при сохранении в Redis: {e}")
 
-# Функция для мониторинга ресурсов
-def log_resource_usage():
-    memory = psutil.virtual_memory().percent
-    cpu = psutil.cpu_percent(interval=0.1)
-    # logging.info(f"Использование ресурсов: Память {memory}%, CPU {cpu}%")
+# Функция для извлечения сигнала от модели интервалов из Redis
+async def get_interval_signal(redis_client):
+    """
+    Извлекает предсказание от модели интервалов из Redis.
+    
+    :param redis_client: клиент Redis
+    :return: сигнал от модели интервалов
+    """
+    interval_signal = await redis_client.get("interval_signal")
+    return int(interval_signal) if interval_signal is not None else 0  # Возвращаем 0, если сигнала нет
+
+# Подготовка запроса для подписки на Binance Futures
+def get_subscription_params():
+    params = {
+        "method": "SUBSCRIBE",
+        "params": ["btcusdt@depth20@100ms"],  # Подписка на стакан для фьючерсного BTCUSDT с интервалом 100 мс
+        "id": 1
+    }
+    return json.dumps(params)
 
 # Обработка данных ордербука и нормализация
 async def analyze_order_book(redis_client):
-    symbol = "btcusdt"
-    depth_url = f"wss://fstream.binance.com/ws/{symbol}@depth20@100ms"
-
+    endpoint = "wss://fstream.binance.com/ws/"  # URL для Binance Futures WebSocket
     while True:
         try:
-            async with websockets.connect(depth_url, ping_interval=None) as websocket:
-                # logging.info(f"Подключение к WebSocket для {symbol} установлено.")
+            async with websockets.connect(endpoint) as websocket:
+                await websocket.send(get_subscription_params())  # Подписка на канал стакана
+
                 while True:
                     try:
-                        # logging.info(f"Подключение к WebSocket для {symbol} установлено.")
                         message = await websocket.recv()
-                        data_received_time = time.time()
-
                         data = json.loads(message)
+
+                        # Обработка данных ордербука
                         bids = np.array(data['b'][:8], dtype=float)
                         asks = np.array(data['a'][:8], dtype=float)
-                        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # UTC время с миллисекундами
+                        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
-                        # Расчет mid_price и объемов с использованием numpy
                         mid_price = (bids[0, 0] + asks[0, 0]) / 2
                         sum_bid_volume = np.sum(bids[:, 1])
                         sum_ask_volume = np.sum(asks[:, 1])
                         imbalance = (sum_bid_volume - sum_ask_volume) / (sum_bid_volume + sum_ask_volume) if (sum_bid_volume + sum_ask_volume) > 0 else 0
 
-                        # Логирование времени между этапами
-                        processing_start_time = time.time()
-                        time_diff_receiving_to_processing = processing_start_time - data_received_time
-                        utc_time_received = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-                        # logging.info(f"Данные получены в {utc_time_received}. Разница между получением и обработкой: {time_diff_receiving_to_processing:.3f} сек")
-
-                        # Нормализация данных с использованием numpy
+                        # Нормализация данных
                         normalized_data = {
                             "timestamp": timestamp,
                             "mid_price": min_max_normalize(mid_price, FIXED_BOUNDARIES["mid_price"]["min"], FIXED_BOUNDARIES["mid_price"]["max"]),
@@ -107,33 +103,23 @@ async def analyze_order_book(redis_client):
 
                         # Сохранение нормализованных данных в Redis
                         await save_to_redis(redis_client, normalized_data)
-
-                        # Логирование времени завершения обработки
-                        end_time = time.time()
-                        time_diff_processing_to_end = end_time - processing_start_time
-                        utc_time_processing_done = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-                        # logging.info(f"Обработка завершена в {utc_time_processing_done}. Время обработки: {time_diff_processing_to_end:.3f} сек")
-
-                        # Логирование использования ресурсов
-                        log_resource_usage()
-
-                        await asyncio.sleep(0.1)
-                        asyncio.sleep(25)
+                        
                     except (json.JSONDecodeError, ValueError) as e:
                         logging.error(f"Ошибка при обработке данных: {e}")
-                        asyncio.sleep(25)
+                        await asyncio.sleep(5)
                     except Exception as e:
                         logging.error(f"Неизвестная ошибка: {e}")
-                        asyncio.sleep(25)
+                        await asyncio.sleep(5)
         except (websockets.exceptions.ConnectionClosedError, asyncio.TimeoutError) as e:
-            # logging.error(f"Ошибка соединения WebSocket: {e}. Повторное подключение...")
-            await asyncio.sleep(5)  # Ожидание перед повторным подключением
+            logging.error(f"Ошибка соединения WebSocket: {e}. Повторное подключение...")
+            await asyncio.sleep(5)
 
 # Функция для запуска скрипта бесконечно
 async def main():
     redis_client = await initialize_redis()
     try:
+        interval_signal = await get_interval_signal(redis_client)
+        print("Received interval signal:", interval_signal)
         await analyze_order_book(redis_client)
     finally:
         await redis_client.close()

@@ -1,0 +1,26 @@
+database:
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: "root"
+  dbname: "binance_data"
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+
+trading:
+  initial_balance: 10000
+  threshold: 0.01
+
+logging:
+  level: INFO
+  log_file: "../logs/trading.log"
+
+model:
+  interval_sequence_length: 60
+  orderbook_sequence_length: 60
+  batch_size: 64
+  epochs: 10
+  learning_rate: 0.001

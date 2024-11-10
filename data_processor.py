@@ -22,10 +22,34 @@ def connect_to_db():
         print(f"Ошибка при подключении к MySQL: {e}")
         return None
 
+def adjust_max_value(value):
+    # Округляем до ближайшего числа, кратного 5000, и добавляем 15000
+    return ((value // 5000) + 1) * 5000 + 15000
+
 # Функция для создания нового окна и деактивации старых
 def create_new_window(connection, interval, min_max_values, start_time, end_time):
     deactivate_windows(connection, interval)
     
+    # Если параметр new=True, то проверяем и обновляем максимальные значения
+    
+        # Получаем существующие максимальные значения, если они есть
+    max_values = [
+        min_max_values.get('max_open_price', 0),
+        min_max_values.get('max_high_price', 0),
+        min_max_values.get('max_low_price', 0),
+        min_max_values.get('max_close_price', 0)
+    ]
+    
+    # Находим наибольшее из этих значений и обновляем через adjust_max_value
+    max_value = max(max_values)
+    adjusted_max_value = adjust_max_value(max_value)
+
+    # Обновляем максимальные значения в min_max_values
+    min_max_values['max_open_price'] = adjusted_max_value
+    min_max_values['max_high_price'] = adjusted_max_value
+    min_max_values['max_low_price'] = adjusted_max_value
+    min_max_values['max_close_price'] = adjusted_max_value
+
     # Задаем min_volume равным 0, чтобы исключить ошибочные создания окон
     min_max_values['min_volume'] = 0
     min_max_values['min_open_price'] = 0
@@ -150,23 +174,27 @@ def update_min_max_stats_for_window(df):
 
 # Функция для обновления min_max значений, обновляя только отличающиеся
 def update_min_max_values(min_max_values, current_window):
-    updated_min_max_values = {}
-
+    # Проходим по всем параметрам, чтобы обновить min/max значения при необходимости
     for column in ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 'rsi', 'macd', 
                    'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 
                    'lower_bb', 'obv']:
         
-        # Проверка для минимального значения
+        # Обновление минимального значения, если оно ниже текущей границы
         min_key = f'min_{column}'
-        if min_max_values[min_key] < current_window.get(min_key, 0):
-            updated_min_max_values[min_key] = min_max_values[min_key]
+        if min_max_values[min_key] < current_window.get(min_key, float('inf')):
+            min_max_values[min_key] = min_max_values[min_key]
+        else:
+            min_max_values[min_key] = current_window.get(min_key, float('inf'))
         
-        # Проверка для максимального значения
+        # Обновление максимального значения, если оно выше текущей границы
         max_key = f'max_{column}'
         if min_max_values[max_key] > current_window.get(max_key, float('-inf')):
-            updated_min_max_values[max_key] = min_max_values[max_key]
+            min_max_values[max_key] = min_max_values[max_key]
+        else:
+            min_max_values[max_key] = current_window.get(max_key, float('-inf'))
 
-    return updated_min_max_values
+    # Возвращаем обновленный словарь min_max_values со всеми значениями
+    return min_max_values
 
 # Функция для проверки, нужно ли создать новое окно или обновить текущее
 def check_and_update_window(connection, interval, df, current_window):
