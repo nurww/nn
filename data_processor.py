@@ -209,28 +209,17 @@ def check_and_update_window(connection, interval, df, current_window):
             start_time=df['open_time'].min(),
             end_time=df['open_time'].max()
         )
-        # Обновляем current_window после создания нового окна
         current_window = get_window_by_id(connection, window_id)
 
-    # Проверка значений, выходящих за пределы текущих min/max, с учетом равенства
-    new_extremes_found = any(
-        (
-            (min_max_values[f'min_{column}'] < current_window.get(f'min_{column}', 0) if column != 'volume' else False) or
-            (min_max_values[f'max_{column}'] > current_window.get(f'max_{column}', float('-inf')))
-        ) and not (
-            min_max_values[f'min_{column}'] == current_window.get(f'min_{column}', 0) and
-            min_max_values[f'max_{column}'] == current_window.get(f'max_{column}', float('-inf'))
-        )
-        for column in ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 'rsi', 'macd', 
-                    'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 
-                    'lower_bb', 'obv']
+    # Проверка, что новый максимум превышает текущий, с учетом округления
+    new_max_exceeds_limit = any(
+        adjust_max_value(min_max_values[f'max_{column}']) > adjust_max_value(current_window.get(f'max_{column}', 0))
+        for column in ['open_price', 'high_price', 'low_price', 'close_price']
     )
 
-    # Если найдены новые экстремумы, создаем новое окно
-    if new_extremes_found:
-        print("Найдено значение за пределами текущего окна. Создание нового окна.")
-
-        # Обновляем только измененные значения
+    # Если найдено превышение предела, создаем новое окно
+    if new_max_exceeds_limit:
+        print("Найден новый максимум, превышающий текущие границы. Создание нового окна.")
         updated_values = update_min_max_values(min_max_values, current_window)
                                            
         window_id = create_new_window(

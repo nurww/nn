@@ -1,17 +1,18 @@
 # orderbook_model.py
 
+import sys
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-import redis
-import os
+import pandas as pd
 import json
-from reward_system import calculate_reward  # Импортируем функцию вознаграждения
-import redis.asyncio as aioredis
-import time
-import traceback
 import asyncio
+from datetime import datetime, timedelta
+from reward_system import calculate_reward
+from amrita.project_root.data.database_manager import execute_query
+import redis.asyncio as aioredis
 
 # Конфигурация Redis
 REDIS_CONFIG = {
@@ -20,20 +21,36 @@ REDIS_CONFIG = {
     'db': 0
 }
 
-# Подключение к Redis для получения сигнала интервалов
-async def get_interval_signal(redis_client):
-    interval_signal = await redis_client.get("interval_signal")
-    return int(interval_signal) if interval_signal is not None else 0
+# Интервалы для моделей
+INTERVALS = ["5m", "15m", "1h", "4h"]
 
-def connect_to_redis():
-    return aioredis.from_url(f"redis://{REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}/{REDIS_CONFIG['db']}")
+# Класс для взаимодействия с Redis
+class RedisManager:
+    def __init__(self):
+        self.redis_client = None
+    
+    async def connect(self):
+        self.redis_client = await aioredis.from_url(f"redis://{REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}/{REDIS_CONFIG['db']}")
 
-# Подключение к Redis для получения сигнала интервалов
-async def get_interval_signal(redis_client):
-    interval_signal = await redis_client.get("interval_signal")
-    return int(interval_signal) if interval_signal is not None else 0
+    async def get_last_timestamp(self, stream_key="order_book_stream"):
+        last_entry = await self.redis_client.lindex(stream_key, -1)
+        if last_entry:
+            last_entry_data = json.loads(last_entry)
+            return datetime.strptime(last_entry_data['timestamp'], '%Y-%m-%d %H:%M:%S.%f')
+        print("Нет данных в order_book_stream")
+        return None
 
-# Определение модели GRU
+    async def set_interval_signal(self, interval, signal):
+        await self.redis_client.set(f"interval_signal_{interval}", signal)
+
+    async def fetch_data(self, redis_key: str, limit: int = 1500):
+        data = await self.redis_client.lrange(redis_key, -limit, -1)
+        return [json.loads(item) for item in data]
+
+    async def close(self):
+        await self.redis_client.close()
+
+# Модель GRU для данных стакана
 class OrderBookGRUModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, dropout=0.2):
         super(OrderBookGRUModel, self).__init__()
@@ -43,24 +60,83 @@ class OrderBookGRUModel(nn.Module):
     def forward(self, x):
         h_0 = torch.zeros(self.gru.num_layers, x.size(0), self.gru.hidden_size).to(x.device)
         out, _ = self.gru(x, h_0)
-        out = self.fc(out[:, -1, :])  # Выход для последнего таймстепа
-        return out
+        return self.fc(out[:, -1, :])
 
-# Получение данных стакана из Redis
-def fetch_orderbook_data(redis_key: str, limit: int = 1500):
-    redis_conn = connect_to_redis()
-    data = redis_conn.lrange(redis_key, -limit, -1)
-    orderbook = [json.loads(item) for item in data]
-    return np.array(orderbook)
+# Модель LSTM для интервалов
+class IntervalLSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, dropout=0.2):
+        super(IntervalLSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        h_0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
+        c_0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h_0, c_0))
+        return self.fc(out[:, -1, :])
+
+async def load_interval_model(interval):
+    model_path = f"saved_models/interval_lstm_model_{interval}.pth"
+    with open("optimized_params.json", "r") as file:
+        params = json.load(file)[interval]
+    model = IntervalLSTMModel(
+        input_size=params["input_size"],
+        hidden_size=params["hidden_size"],
+        num_layers=params["num_layers"],
+        output_size=1,
+        dropout=params["dropout"]
+    ).to("cuda")
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    return model
 
 def prepare_data(orderbook_data: np.array, sequence_length: int):
-    """Преобразует данные стакана в последовательности для обучения."""
     X, y = [], []
     for i in range(len(orderbook_data) - sequence_length):
         X.append(orderbook_data[i:i + sequence_length])
-        # Пример: используем изменение цены bid как целевой признак
         y.append(orderbook_data[i + sequence_length]['price_bid'])
     return np.array(X), np.array(y)
+
+def fetch_last_sequence_from_mysql(interval: str, sequence_length: int, end_time: datetime) -> pd.DataFrame:
+    query = f"""
+        SELECT * FROM binance_klines_normalized
+        WHERE data_interval = '{interval}' AND open_time <= '{end_time}'
+        ORDER BY open_time DESC
+        LIMIT {sequence_length}
+    """
+    data = execute_query(query)
+    if not data.empty:
+        data = data.iloc[::-1]
+    return data
+
+async def predict_and_save_interval_signal(redis_manager, interval, model, sequence_length):
+    last_timestamp = await redis_manager.get_last_timestamp()
+    if last_timestamp is None:
+        return
+
+    interval_data = fetch_last_sequence_from_mysql(interval, sequence_length, last_timestamp)
+    if interval_data.empty:
+        print(f"Нет данных для интервала {interval} до времени {last_timestamp}")
+        return
+
+    interval_data_tensor = torch.tensor(interval_data.values).float().unsqueeze(0).to("cuda")
+    prediction = model(interval_data_tensor)
+    interval_signal = int(torch.sign(prediction.item()))
+    await redis_manager.set_interval_signal(interval, interval_signal)
+
+async def synchronize_and_train(redis_manager, orderbook_model, criterion, optimizer, train_loader, val_loader):
+    interval_models = {interval: await load_interval_model(interval) for interval in INTERVALS}
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for epoch in range(10):
+        for interval, model in interval_models.items():
+            await predict_and_save_interval_signal(redis_manager, interval, model, sequence_length=60)
+
+        train_loss = train_model(orderbook_model, train_loader, criterion, optimizer, device)
+        val_loss = evaluate_model(orderbook_model, val_loader, criterion, device)
+        print(f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+        await asyncio.sleep(60)
 
 def train_model(model, train_loader, criterion, optimizer, device):
     model.train()
@@ -86,108 +162,29 @@ def evaluate_model(model, val_loader, criterion, device):
             total_loss += loss.item()
     return total_loss / len(val_loader)
 
-def save_model(model, filepath):
-    """Сохраняет обученную модель на диск."""
-    torch.save(model.state_dict(), filepath)
-    print(f"Модель сохранена по пути: {filepath}")
-
-# Основной процесс обучения и оценки с системой поощрений
-# Основной процесс обучения и оценки с системой поощрений
 async def main():
-    redis_key = "orderbook_data"
-    sequence_length = 60
-    input_size = 5  # Количество фичей (price_bid, quantity_bid, price_ask, quantity_ask, spread)
-    hidden_size = 128
-    num_layers = 2
-    output_size = 1
-    dropout = 0.3
-    batch_size = 64
+    redis_manager = RedisManager()
+    await redis_manager.connect()
 
     # Подготовка данных
-    orderbook_data = fetch_orderbook_data(redis_key)
-    X, y = prepare_data(orderbook_data, sequence_length=sequence_length)
-    
-    # Разделение данных на обучающую и тестовую выборки
+    sequence_length = 60
+    orderbook_data = await redis_manager.fetch_data("orderbook_data")
+    X, y = prepare_data(orderbook_data, sequence_length)
     train_size = int(0.8 * len(X))
     X_train, X_val = X[:train_size], X[train_size:]
     y_train, y_val = y[:train_size], y[train_size:]
-    
-    # Создание загрузчиков данных
-    train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32)), batch_size=batch_size)
-    
-    # Настройки модели
+
+    train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)), batch_size=64, shuffle=True)
+    val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32)), batch_size=64)
+
+    # Инициализация модели и оптимизатора
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = OrderBookGRUModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, output_size=output_size, dropout=dropout).to(device)
+    orderbook_model = OrderBookGRUModel(input_size=5, hidden_size=128, num_layers=2, output_size=1, dropout=0.3).to(device)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
-    # Подключение к Redis для получения сигнала интервалов
-    redis_client = await connect_to_redis()
+    optimizer = torch.optim.Adam(orderbook_model.parameters(), lr=0.001)
 
-    # Обучение модели с системой поощрений
-    epochs = 10
-    for epoch in range(epochs):
-        try:
-            start_time = time.time()
-            train_loss = train_model(model, train_loader, criterion, optimizer, device)
-            val_loss = evaluate_model(model, val_loader, criterion, device)
-            end_time = time.time()
-            print(f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Time Taken: {end_time - start_time:.2f} seconds")
-            
-            # Пример расчета вознаграждения на этапе валидации
-            interval_signal = await get_interval_signal(redis_client)  # Получаем сигнал интервала
-            for X_val_batch, y_val_batch in val_loader:
-                X_val_batch, y_val_batch = X_val_batch.to(device), y_val_batch.to(device)
-                predictions = model(X_val_batch)
-
-                for i in range(len(predictions)):
-                    pred_value = predictions[i].item()
-                    actual_value = y_val_batch[i].item()
-                    interval_agreement = (interval_signal > 0 and pred_value > 0) or (interval_signal < 0 and pred_value < 0)
-                    reward = calculate_reward(pred_value, actual_value)
-                    if interval_agreement:
-                        reward += 0.5
-                    print(f"Prediction: {pred_value}, Actual: {actual_value}, Reward: {reward}, Interval Agreement: {interval_agreement}")
-        except Exception as e:
-            print(f"Error in epoch {epoch + 1}: {e}")
-            traceback.print_exc()
-            await asyncio.sleep(5)  # Wait before retrying the next epoch
-
-    # Сохранение модели
-    model_filepath = "saved_models/orderbook_gru_model.pth"
-    os.makedirs(os.path.dirname(model_filepath), exist_ok=True)
-    save_model(model, model_filepath)
-
-    await redis_client.close()
-
-import torch
-from models.orderbook_model import OrderBookGRUModel
-from utils.model_utils import save_model, load_model
-
-# Конфигурация теста
-input_size = 5
-hidden_size = 128
-num_layers = 2
-output_size = 1
-sequence_length = 60
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Тестовая функция для модели
-def test_orderbook_model():
-    model = OrderBookGRUModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, output_size=output_size).to(device)
-    
-    # Генерация случайных данных
-    X_test = torch.randn(1, sequence_length, input_size).to(device)
-    output = model(X_test)
-    
-    # Сохранение и загрузка модели
-    save_model(model, "test_orderbook_model.pth")
-    loaded_model = load_model(model, "test_orderbook_model.pth", device)
-    
-    # Предсказание с загруженной моделью
-    prediction = loaded_model(X_test)
-    print("Test prediction:", prediction.item())
+    await synchronize_and_train(redis_manager, orderbook_model, criterion, optimizer, train_loader, val_loader)
+    await redis_manager.close()
 
 if __name__ == "__main__":
-    test_orderbook_model()
+    asyncio.run(main())
