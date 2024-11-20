@@ -13,11 +13,11 @@ import time
 from datetime import datetime
 
 # Добавляем текущий путь к проекту в sys.path для корректного импорта
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.append(project_root)
+amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(amrita)
 
-from amrita.project_root.models.interval_model import IntervalLSTMModel
-from amrita.project_root.data.database_manager import execute_query
+from project_root.models.interval_model import IntervalLSTMModel
+from project_root.data.database_manager import execute_query
 
 # Настройка логирования
 logging.basicConfig(
@@ -39,33 +39,30 @@ def fetch_interval_data(interval: str) -> pd.DataFrame:
 
 def prepare_data(data: pd.DataFrame, target_column: str, sequence_length: int):
     logging.info(f"Preparing data with sequence length {sequence_length}")
-    min_value, max_value = data[target_column].min(), data[target_column].max()
 
-    logging.info(f"Available columns: {data.columns.tolist()}")
-    try:
-        logging.info(f"Sample data from target column {target_column}: {data[target_column].head()}")
-    except KeyError:
-        logging.error(f"Column {target_column} not found in data.")
-        raise KeyError(f"Column '{target_column}' not found in data.")
+    # Нормализация данных
+    min_value = data[target_column].min()
+    max_value = data[target_column].max()
+    # data[target_column] = (data[target_column] - min_value) / (max_value - min_value)
+    
+    logging.info(f"Target column (normalized) min: {min_value}, max: {max_value}")
+    logging.info(f"First 5 normalized values: {data[target_column].head().values}")
+    logging.info(f"Last 5 normalized values: {data[target_column].tail().values}")
 
-    columns_to_drop = ["open_time", "close_time", "data_interval", target_column]
-    columns_to_drop = [col for col in columns_to_drop if col in data.columns]
-    features = data.drop(columns=columns_to_drop).values.astype(np.float32)
+    # Формируем X, y и временные метки
+    features = data.drop(columns=["open_time", "close_time", "data_interval", "window_id", target_column]).values.astype(np.float32)
     targets = data[target_column].values.astype(np.float32)
+    open_times = data["open_time"].values
+    close_times = data["close_time"].values
 
-    X, y = [], []
+    X, y, times = [], [], []
     for i in range(len(features) - sequence_length):
         X.append(features[i:i + sequence_length])
         y.append(targets[i + sequence_length])
+        times.append((open_times[i + sequence_length], close_times[i + sequence_length]))
 
-    # Добавьте проверку данных для последних строк, чтобы убедиться в их корректности
-    logging.info("Checking last 5 entries of the dataset for verification:")
-    logging.info(data[["id", "open_time", "close_time", target_column]].tail(5))
-
-    min_value = 0
-    max_value = 1
-    return np.array(X), np.array(y), min_value, max_value
-
+    logging.info(f"Prepared data - Sequence length: {sequence_length}, Total samples: {len(X)}")
+    return np.array(X), np.array(y), np.array(times), min_value, max_value
 
 def denormalize(value, min_value, max_value):
     return value * (max_value - min_value) + min_value
@@ -100,12 +97,43 @@ def objective(trial):
         logging.warning("No data available, skipping trial.")
         return float("inf")
 
-    X, y, min_value, max_value = prepare_data(data, target_column="close_price_normalized", sequence_length=sequence_length)
-    
+    X, y, times, min_value, max_value = prepare_data(data, target_column="close_price_normalized", sequence_length=sequence_length)
+
     train_size = int(0.8 * len(X))
     X_train, X_val = X[:train_size], X[train_size:]
     y_train, y_val = y[:train_size], y[train_size:]
-    
+    times_train, times_val = times[:train_size], times[train_size:]
+
+    # Проверки индексов и данных
+    logging.info(f"Train size: {train_size}, Validation size: {len(y_val)}")
+    logging.info(f"First 5 training targets: {y_train[:5]}")
+    logging.info(f"First 5 validation targets: {y_val[:5]}")
+    # Логируем первые 5 временных меток из валидации
+    for i in range(5):
+        logging.info(f"Validation times[{i}]: Open: {times_val[i][0]}, Close: {times_val[i][1]}, y_val: {y_val[i]}")
+
+    # Логи для данных перед разбиением
+    logging.info(f"First 5 rows of data before splitting: {data.head()}")
+    logging.info(f"Last 5 rows of data before splitting: {data.tail()}")
+
+    # Логи для min/max из MySQL
+    mysql_min = data["close_price_normalized"].min()
+    mysql_max = data["close_price_normalized"].max()
+    logging.info(f"MySQL Min: {mysql_min}, MySQL Max: {mysql_max}")
+
+    # Логи для min/max в коде
+    logging.info(f"Code Min: {min_value}, Code Max: {max_value}")
+
+    # Логи для соответствия индексов
+    for i in range(5):
+        logging.info(f"Index {i}: y_val={y_val[i]}, base_close={data.iloc[train_size + i]['close_price_normalized']}")
+
+    # Тест нормализации и денормализации
+    test_value = 0.5
+    denormalized = denormalize(test_value, min_value, max_value)
+    renormalized = (denormalized - min_value) / (max_value - min_value)
+    logging.info(f"Test Value: {test_value}, Denormalized: {denormalized}, Renormalized: {renormalized}")
+
     train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32)), batch_size=batch_size)
 
@@ -136,18 +164,30 @@ def objective(trial):
             sample_data = torch.tensor(X_val[-5:], dtype=torch.float32).to("cuda")
             predictions = model(sample_data).cpu().numpy()
             denormalized_preds = [denormalize(pred[0], min_value, max_value) for pred in predictions]
-            denormalized_targets = [denormalize(y_val[i], min_value, max_value) for i in range(-5, 0)]
+            denormalized_targets = [denormalize(value, min_value, max_value) for value in y_val[:5]]
             
-            # Создаем DataFrame для вывода в лог и проверяем, что значения корректны
+            # Проверка нормализации
+            for i, value in enumerate(y_val[:5]):
+                denormalized_value = denormalize(value, min_value, max_value)
+                base_value = data.iloc[train_size + i]["close_price_normalized"]
+                logging.info(f"y_val[{i}]: {value}, Denormalized: {denormalized_value}, Base close_price_normalized: {base_value}")
+
+            # Создаем DataFrame для вывода в лог
             results_df = pd.DataFrame({
-            "id": data["id"].values[train_size:train_size+5],
-            "open_time": data["open_time"].values[train_size:train_size+5],
-            "close_time": data["close_time"].values[train_size:train_size+5],
-            "predicted_close": [denormalize(pred, min_value, max_value) for pred in denormalized_preds],
-            "actual_close": [denormalize(target, min_value, max_value) for target in y_val[:5]],
-            "base_close": data["close_price_normalized"].values[train_size:train_size+5]
-        })
+                "open_time": [time[0] for time in times_val[:5]],
+                "close_time": [time[1] for time in times_val[:5]],
+                "predicted_close": [denormalize(pred[0], min_value, max_value) for pred in predictions],
+                "actual_close": [denormalize(value, min_value, max_value) for value in y_val[:5]],
+                "base_close": [data.iloc[train_size + i]["close_price_normalized"] for i in range(5)]
+            })
+
+            logging.info(f"Results DataFrame:\n{results_df}")
+
+
         logging.info(f"Epoch {epoch + 1}, Sample Predictions:\n{results_df}")
+
+    # Остальной код без изменений...
+
 
 
     model.eval()

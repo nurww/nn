@@ -5,7 +5,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
-from amrita.project_root.data.database_manager import execute_query
+from project_root.data.database_manager import execute_query
 import os
 import redis.asyncio as aioredis  # Асинхронная версия библиотеки redis-py
 import json
