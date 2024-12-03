@@ -26,13 +26,44 @@ def adjust_max_value(value):
     # Округляем до ближайшего числа, кратного 5000, и добавляем 15000
     return ((value // 5000) + 1) * 5000 + 15000
 
+from decimal import Decimal
+
+def adjust_indicator_min_max_value(value, is_max=True):
+    """
+    Увеличивает максимум в 1.5 раза или уменьшает минимум на 1.5 раза.
+    """
+    # Приведение к Decimal для обеспечения совместимости
+    value = Decimal(value)
+    if is_max:
+        return value * Decimal(1.5)
+    else:
+        return value * Decimal(1.5) if value < 0 else value
+
 # Функция для создания нового окна и деактивации старых
 def create_new_window(connection, interval, min_max_values, start_time, end_time):
     deactivate_windows(connection, interval)
+
+    # Обновляем значения индикаторов
+    indicators = [
+        'volume', 'rsi', 'macd', 'macd_signal', 'macd_hist', 
+        'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv'
+    ]
+
+    for indicator in indicators:
+        max_key = f'max_{indicator}'
+        min_key = f'min_{indicator}'
+        
+        # Обновляем максимум индикатора
+        if max_key in min_max_values:
+            min_max_values[max_key] = adjust_indicator_min_max_value(float(min_max_values[max_key]), is_max=True)
+        
+        # Обновляем минимум индикатора
+        if min_key in min_max_values:
+            min_max_values[min_key] = adjust_indicator_min_max_value(float(min_max_values[min_key]), is_max=False)
     
     # Если параметр new=True, то проверяем и обновляем максимальные значения
     
-        # Получаем существующие максимальные значения, если они есть
+    # Получаем существующие максимальные значения, если они есть
     max_values = [
         min_max_values.get('max_open_price', 0),
         min_max_values.get('max_high_price', 0),
@@ -175,23 +206,36 @@ def update_min_max_stats_for_window(df):
 # Функция для обновления min_max значений, обновляя только отличающиеся
 def update_min_max_values(min_max_values, current_window):
     # Проходим по всем параметрам, чтобы обновить min/max значения при необходимости
-    for column in ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 'rsi', 'macd', 
-                   'macd_signal', 'macd_hist', 'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 
-                   'lower_bb', 'obv']:
+    for column in ['open_price', 'high_price', 'low_price', 'close_price', 'volume', 
+                'rsi', 'macd', 'macd_signal', 'macd_hist', 
+                'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv']:
         
-        # Обновление минимального значения, если оно ниже текущей границы
+        # Обновление минимального значения
         min_key = f'min_{column}'
-        if min_max_values[min_key] < current_window.get(min_key, float('inf')):
-            min_max_values[min_key] = min_max_values[min_key]
+        if column in ['volume', 'rsi', 'macd', 'macd_signal', 'macd_hist', 
+                    'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv']:
+            # Для индикаторов обновляем минимумы с уменьшением в 1.5 раза
+            if min_max_values[min_key] < current_window.get(min_key, float('inf')):
+                min_max_values[min_key] = adjust_indicator_min_max_value(min_max_values[min_key], is_max=False)
         else:
-            min_max_values[min_key] = current_window.get(min_key, float('inf'))
+            if min_max_values[min_key] < current_window.get(min_key, float('inf')):
+                min_max_values[min_key] = min_max_values[min_key]
+            else:
+                min_max_values[min_key] = current_window.get(min_key, float('inf'))
         
-        # Обновление максимального значения, если оно выше текущей границы
+        # Обновление максимального значения
         max_key = f'max_{column}'
-        if min_max_values[max_key] > current_window.get(max_key, float('-inf')):
-            min_max_values[max_key] = min_max_values[max_key]
+        if column in ['volume', 'rsi', 'macd', 'macd_signal', 'macd_hist', 
+                    'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv']:
+            # Для индикаторов обновляем максимумы с увеличением в 1.5 раза
+            if min_max_values[max_key] > current_window.get(max_key, float('-inf')):
+                min_max_values[max_key] = adjust_indicator_min_max_value(min_max_values[max_key], is_max=True)
         else:
-            min_max_values[max_key] = current_window.get(max_key, float('-inf'))
+            if min_max_values[max_key] > current_window.get(max_key, float('-inf')):
+                min_max_values[max_key] = min_max_values[max_key]
+            else:
+                min_max_values[max_key] = current_window.get(max_key, float('-inf'))
+
 
     # Возвращаем обновленный словарь min_max_values со всеми значениями
     return min_max_values
@@ -211,17 +255,17 @@ def check_and_update_window(connection, interval, df, current_window):
         )
         current_window = get_window_by_id(connection, window_id)
 
-    # Проверка, что новый максимум превышает текущий, с учетом округления
+    # Проверка, что новый максимум для цен превышает текущий, с учетом округления
     new_max_exceeds_limit = any(
         adjust_max_value(min_max_values[f'max_{column}']) > adjust_max_value(current_window.get(f'max_{column}', 0))
         for column in ['open_price', 'high_price', 'low_price', 'close_price']
     )
 
-    # Если найдено превышение предела, создаем новое окно
+    # Если превышение найдено для цен, создаем новое окно
     if new_max_exceeds_limit:
-        print("Найден новый максимум, превышающий текущие границы. Создание нового окна.")
+        print("Найден новый максимум для цен. Создание нового окна.")
         updated_values = update_min_max_values(min_max_values, current_window)
-                                           
+                                            
         window_id = create_new_window(
             connection, interval, updated_values,
             start_time=df['open_time'].min(),
@@ -229,10 +273,28 @@ def check_and_update_window(connection, interval, df, current_window):
         )
         current_window = get_window_by_id(connection, window_id)
     else:
-        # Если значения в пределах текущих, обновляем даты границ окна
-        print("Обновление временных границ текущего окна.")
-        window_id = current_window['window_id']
-        update_window_dates(connection, window_id, start_time=df['open_time'].min(), end_time=df['open_time'].max())
+        # Проверка, что новый максимум для индикаторов превышает текущий
+        new_max_exceeds_limit_indicators = any(
+            adjust_indicator_min_max_value(min_max_values[f'max_{indicator}']) > adjust_indicator_min_max_value(current_window.get(f'max_{indicator}', 0))
+            for indicator in ['volume', 'rsi', 'macd', 'macd_signal', 'macd_hist', 
+                            'sma_20', 'ema_20', 'upper_bb', 'middle_bb', 'lower_bb', 'obv']
+        )
+        if new_max_exceeds_limit_indicators:
+            print("Найден новый максимум для индикаторов. Создание нового окна.")
+            updated_values = update_min_max_values(min_max_values, current_window)
+            
+            window_id = create_new_window(
+                connection, interval, updated_values,
+                start_time=df['open_time'].min(),
+                end_time=df['open_time'].max()
+            )
+            current_window = get_window_by_id(connection, window_id)
+        else:
+            # Если значения в пределах текущих, обновляем даты границ окна
+            print("Обновление временных границ текущего окна.")
+            window_id = current_window['window_id']
+            update_window_dates(connection, window_id, start_time=df['open_time'].min(), end_time=df['open_time'].max())
+
     
     return window_id
 

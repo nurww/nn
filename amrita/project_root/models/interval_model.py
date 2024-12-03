@@ -5,7 +5,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
-from project_root.data.database_manager import execute_query
+from amrita.project_root.data.database_manager import execute_query
 import os
 import redis.asyncio as aioredis  # Асинхронная версия библиотеки redis-py
 import json
@@ -56,9 +56,8 @@ def fetch_interval_data(interval: str) -> pd.DataFrame:
     return data
 
 def prepare_data(data: pd.DataFrame, target_column: str, sequence_length: int):
-    """Подготовка данных для обучения модели."""
-    features = data.drop(columns=[target_column]).values
-    targets = data[target_column].values
+    features = data.drop(columns=["id", "open_time", "close_time", "data_interval", "window_id", target_column]).values.astype(np.float32)
+    targets = data[target_column].values.astype(np.float32)
 
     X, y = [], []
     for i in range(len(features) - sequence_length):
@@ -123,7 +122,7 @@ def predict(model, data, device):
 # }
 # Основной процесс обучения и сохранения модели
 async def main():
-    interval = "1h"  # Пример интервала
+    interval = "1d"  # Пример интервала
 
     # Загрузка оптимизированных гиперпараметров из JSON-файла
     with open("optimized_params.json", "r") as file:
@@ -186,6 +185,8 @@ async def main():
     test_data = X_val[-1]  # Последняя последовательность валидационных данных
     prediction = predict(loaded_model, test_data, "cuda")
     print(f"Прогноз для последнего батча валидационных данных: {prediction}")
+    # denormalized_prediction = denormalize(prediction[0][0], min_value, max_value)
+    # print(f"Денормализованный прогноз: {denormalized_prediction}")
 
 if __name__ == "__main__":
     main()
