@@ -102,8 +102,8 @@ def aggregate_small_data(small_data: pd.DataFrame, interval: str) -> pd.DataFram
         "4h": "1D",
         "1h": "4h",
         "15m": "1h",
-        "5m": "15T",
-        "1m": "5T"
+        "5m": "15min",
+        "1m": "5min"
     }
 
     if interval not in freq_map:
@@ -183,11 +183,17 @@ def prepare_data(data: pd.DataFrame, target_columns: list, sequence_length: int)
     # Получаем копию данных, чтобы не повлиять на исходный DataFrame
     data = data.copy()
 
-    # Убираем лишние колонки
-    features = data.drop(columns=["id", "open_time", "close_time", "data_interval", "window_id",
-                                  "next_open_time", "next_close_time", "small_open_time", "small_close_time",
-                                  "small_low_price", "small_high_price", "small_open_price", "small_close_price",
-                                  "small_volume"] + target_columns).values.astype(np.float32)
+    # Определяем список колонок для удаления
+    columns_to_drop = [
+        "id", "open_time", "close_time", "data_interval", "window_id",
+        "next_open_time", "next_close_time", "small_open_time", "small_close_time",
+        "small_low_price", "small_high_price", "small_open_price", "small_close_price",
+        "small_volume"
+    ] + target_columns
+
+    # Убираем только существующие колонки
+    columns_to_drop = [col for col in columns_to_drop if col in data.columns]
+    features = data.drop(columns=columns_to_drop).values.astype(np.float32)
 
     # Настраиваем вывод numpy, чтобы показывать все данные строки
     # np.set_printoptions(suppress=True, precision=8, threshold=np.inf, linewidth=np.inf)
@@ -200,11 +206,14 @@ def prepare_data(data: pd.DataFrame, target_columns: list, sequence_length: int)
     X, y = [], []
 
     for i in range(len(features) - sequence_length):
-        # Формируем последовательность
+        # Формируем последовательность признаков
         X_sequence = features[i:i + sequence_length]
 
-        # Берем последнюю строку из target_columns для предсказания
+        # Формируем последовательность целевых значений для предсказания
         y_target = data[target_columns].iloc[i + sequence_length].values.astype(np.float32)
+
+        # Преобразуем y_targets в одномерный массив
+        # y_targets = y_targets.flatten()
 
         X.append(X_sequence)
         y.append(y_target)
@@ -228,20 +237,33 @@ def objective(trial):
 
     logging.info(f"Trial parameters - hidden_size: {hidden_size}, num_layers: {num_layers}, dropout: {dropout}, learning_rate: {learning_rate}, sequence_length: {sequence_length}, batch_size: {batch_size}")
 
-    interval = "1h"  # пример интервала
-    small_interval = "15m"  # пример интервала
+    interval = "1d"  # пример интервала
+    small_interval = "4h"  # пример интервала
+
     data = fetch_interval_data(interval)
     window_data = get_active_window(interval)
-    small_data = fetch_small_interval_data(small_interval)
-    if data.empty or small_data.empty:
+
+    if small_interval is not None:
+        small_data = fetch_small_interval_data(small_interval)
+        if small_data.empty:
+            logging.warning(f"No small interval data available for interval {small_interval}. Proceeding without it.")
+            small_data = None
+    else:
+        small_data = None
+    
+    if data.empty:
         logging.warning("No data available, skipping trial.")
         return float("inf")
     
-    aggregated_small_data = aggregate_small_data(small_data, small_interval)
+    if small_data is not None:
+        aggregated_small_data = aggregate_small_data(small_data, small_interval)
     # logging.info(f"Aggregated data: \n{aggregated_small_data}")
-    normalized_small_data = normalize_small_data(aggregated_small_data, window_data)
+        normalized_small_data = normalize_small_data(aggregated_small_data, window_data)
     # logging.info(f"Normalized data: \n{normalized_small_data}")
-    final_data = merge_large_and_small_data(data, normalized_small_data)
+        final_data = merge_large_and_small_data(data, normalized_small_data)
+    else:
+        final_data = data.copy()
+
     # logging.info(f"Final data: \n{final_data}")
 
     # X, y, times, min_value, max_value = prepare_data(final_data, target_column="close_price_normalized", sequence_length=sequence_length)
@@ -357,12 +379,12 @@ def objective(trial):
 
             train_results_df = pd.DataFrame({
                 "Predicted_open": train_predictions[:, 0],
-                "Predicted_close": train_predictions[:, 1],
-                "Predicted_low": train_predictions[:, 2],
-                "Predicted_high": train_predictions[:, 3],
                 "Actual_open": train_targets[:, 0],
+                "Predicted_close": train_predictions[:, 1],
                 "Actual_close": train_targets[:, 1],
+                "Predicted_low": train_predictions[:, 2],
                 "Actual_low": train_targets[:, 2],
+                "Predicted_high": train_predictions[:, 3],
                 "Actual_high": train_targets[:, 3],
             })
 
