@@ -40,11 +40,11 @@
         "batch_size": 46
     },
     "1m": {
-        "hidden_size": 180,
-        "num_layers": 3,
-        "dropout": 0.292111473485539,
-        "learning_rate": 0.0000967096985083881,
-        "sequence_length": 89,
-        "batch_size": 69
+        "hidden_size": 106,
+        "num_layers": 1,
+        "dropout": 0.0,
+        "learning_rate": 0.0007781621490112896,
+        "sequence_length": 87,
+        "batch_size": 32
     }
 }

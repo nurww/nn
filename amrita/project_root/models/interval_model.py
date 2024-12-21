@@ -1,17 +1,22 @@
 # interval_model.py
 
+import sys
 import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
-from amrita.project_root.data.database_manager import execute_query
 import os
 import redis.asyncio as aioredis  # Асинхронная версия библиотеки redis-py
 import json
 import logging
 import time
 from datetime import datetime
+
+# Добавляем текущий путь к проекту в sys.path для корректного импорта
+amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(amrita)
+from project_root.data.database_manager import execute_query
 
 # Конфигурация для Redis
 REDIS_CONFIG = {
@@ -193,7 +198,7 @@ def prepare_data(data: pd.DataFrame, target_columns: list, sequence_length: int)
         "next_open_time", "next_close_time", "small_open_time", "small_close_time",
         "small_low_price", "small_high_price", "small_open_price", "small_close_price",
         "small_volume"
-    ] + target_columns
+    ]
 
     # Убираем только существующие колонки
     columns_to_drop = [col for col in columns_to_drop if col in data.columns]
@@ -269,8 +274,8 @@ def predict(model, data, device):
 # }
 # Основной процесс обучения и сохранения модели
 def main():
-    interval = "15m"  # Пример интервала
-    small_interval = "5m"
+    interval = "1m"  # Пример интервала
+    small_interval = None
 
     # Загрузка оптимизированных гиперпараметров из JSON-файла
     with open("optimized_params.json", "r") as file:

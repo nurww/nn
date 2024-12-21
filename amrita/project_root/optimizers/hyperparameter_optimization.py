@@ -16,8 +16,8 @@ from datetime import datetime
 amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(amrita)
 
-from amrita.project_root.models.interval_model import IntervalLSTMModel
-from amrita.project_root.data.database_manager import execute_query
+from project_root.models.interval_model import IntervalLSTMModel
+from project_root.data.database_manager import execute_query
 
 # Настройка логирования
 logging.basicConfig(
@@ -71,7 +71,7 @@ def normalize_small_data(small_data: pd.DataFrame, window_data: pd.DataFrame) ->
 
 def fetch_interval_data(interval: str) -> pd.DataFrame:
     logging.info(f"Fetching interval data for {interval}")
-    query = f"SELECT * FROM binance_klines_normalized WHERE `data_interval` = '{interval}' order by open_time"
+    query = f"SELECT * FROM binance_klines_normalized WHERE `data_interval` = '{interval}' order by open_time LIMIT 50000"
     data = execute_query(query)
     if data.empty:
         logging.warning(f"No data found for interval {interval}")
@@ -189,7 +189,7 @@ def prepare_data(data: pd.DataFrame, target_columns: list, sequence_length: int)
         "next_open_time", "next_close_time", "small_open_time", "small_close_time",
         "small_low_price", "small_high_price", "small_open_price", "small_close_price",
         "small_volume"
-    ] + target_columns
+    ]
 
     # Убираем только существующие колонки
     columns_to_drop = [col for col in columns_to_drop if col in data.columns]
@@ -237,8 +237,8 @@ def objective(trial):
 
     logging.info(f"Trial parameters - hidden_size: {hidden_size}, num_layers: {num_layers}, dropout: {dropout}, learning_rate: {learning_rate}, sequence_length: {sequence_length}, batch_size: {batch_size}")
 
-    interval = "1d"  # пример интервала
-    small_interval = "4h"  # пример интервала
+    interval = "1m"  # пример интервала
+    small_interval = None  # пример интервала
 
     data = fetch_interval_data(interval)
     window_data = get_active_window(interval)
@@ -360,8 +360,7 @@ def objective(trial):
 
         # Сброс счетчика батча для следующей эпохи
         batch_index = 0
-        logging.info(f"Epoch {epoch + 1} completed, Train Loss: {epoch_loss / len(train_loader):.4f}")
-
+        logging.info(f"Epoch {epoch + 1} completed, Train Loss: {epoch_loss / len(train_loader):.14f}")
 
         # Пример прогноза после каждой эпохи
         model.eval()
