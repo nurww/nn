@@ -7,23 +7,14 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
 import os
-import redis.asyncio as aioredis  # Асинхронная версия библиотеки redis-py
 import json
 import logging
-import time
 from datetime import datetime
 
 # Добавляем текущий путь к проекту в sys.path для корректного импорта
 amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(amrita)
 from project_root.data.database_manager import execute_query
-
-# Конфигурация для Redis
-REDIS_CONFIG = {
-    'host': 'localhost',
-    'port': 6379,
-    'db': 0
-}
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,20 +23,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     encoding='utf-8'
 )
-
-# Настройка асинхронного подключения к Redis
-async def initialize_redis():
-    return aioredis.from_url(f"redis://{REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}", db=REDIS_CONFIG['db'])
-
-# Функция для сохранения сигнала от модели интервалов в Redis
-async def save_interval_signal(redis_client, interval_signal):
-    """
-    Сохраняет предсказание от модели интервалов в Redis.
-    
-    :param redis_client: клиент Redis
-    :param interval_signal: сигнал от модели интервалов (например, +1 для восходящего тренда, -1 для нисходящего)
-    """
-    await redis_client.set("interval_signal", interval_signal)
 
 # Модель LSTM для анализа интервалов
 # IntervalLSTMModel class in interval_model.py

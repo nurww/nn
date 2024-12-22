@@ -8,12 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
 import json
-import asyncio
-from datetime import datetime, timedelta
-# from reward_system import calculate_reward
-import redis.asyncio as aioredis
 import logging
-import time
 from datetime import datetime
 import optuna
 
@@ -22,16 +17,6 @@ amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(amrita)
 
 from project_root.data.database_manager import execute_query
-
-# Конфигурация Redis
-REDIS_CONFIG = {
-    'host': 'localhost',
-    'port': 6379,
-    'db': 0
-}
-
-# Интервалы для моделей
-INTERVALS = ["1d", "4h", "1h", "15m", "5m", "1m"]
 
 # Настройка логирования
 logging.basicConfig(
@@ -65,71 +50,6 @@ class IntervalLSTMModel(nn.Module):
         c_0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
         out, _ = self.lstm(x, (h_0, c_0))
         return self.fc(out[:, -1, :])
-
-def fetch_last_sequence_from_mysql(interval: str, sequence_length: int, end_time: datetime) -> pd.DataFrame:
-    query = f"""
-        SELECT * FROM binance_klines_normalized
-        WHERE data_interval = '{interval}' AND open_time <= '{end_time}'
-        ORDER BY open_time DESC
-        LIMIT {sequence_length}
-    """
-    data = execute_query(query)
-    if not data.empty:
-        data = data.iloc[::-1]
-    return data
-
-async def predict_and_save_interval_signal(redis_manager, interval, model, sequence_length):
-    last_timestamp = await redis_manager.get_last_timestamp()
-    if last_timestamp is None:
-        return
-
-    interval_data = fetch_last_sequence_from_mysql(interval, sequence_length, last_timestamp)
-    if interval_data.empty:
-        print(f"Нет данных для интервала {interval} до времени {last_timestamp}")
-        return
-
-    interval_data_tensor = torch.tensor(interval_data.values).float().unsqueeze(0).to("cuda")
-    prediction = model(interval_data_tensor)
-    interval_signal = int(torch.sign(prediction.item()))
-    await redis_manager.set_interval_signal(interval, interval_signal)
-
-async def synchronize_and_train(redis_manager, orderbook_model, criterion, optimizer, train_loader, val_loader):
-    interval_models = {interval: await load_interval_model(interval) for interval in INTERVALS}
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    for epoch in range(10):
-        for interval, model in interval_models.items():
-            await predict_and_save_interval_signal(redis_manager, interval, model, sequence_length=60)
-
-        train_loss = train_model(orderbook_model, train_loader, criterion, optimizer, device)
-        val_loss = evaluate_model(orderbook_model, val_loader, criterion, device)
-        print(f"Epoch {epoch + 1}, Train Loss: {train_loss:.14f}, Validation Loss: {val_loss:.14f}")
-
-        await asyncio.sleep(60)
-
-def train_model(model, train_loader, criterion, optimizer, device):
-    model.train()
-    total_loss = 0
-    for X_batch, y_batch in train_loader:
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-        optimizer.zero_grad()
-        y_pred = model(X_batch)
-        loss = criterion(y_pred, y_batch)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(train_loader)
-
-def evaluate_model(model, val_loader, criterion, device):
-    model.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for X_batch, y_batch in val_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            y_pred = model(X_batch)
-            loss = criterion(y_pred, y_batch)
-            total_loss += loss.item()
-    return total_loss / len(val_loader)
 
 def fetch_orderbook_data() -> pd.DataFrame:
     logging.info(f"Fetching data for orderbook")
@@ -182,8 +102,6 @@ def fetch_small_interval_data(interval: str, last_timestamp: datetime, required_
     data = execute_query(query)
     if data.empty:
         logging.warning(f"No data found for small interval {interval}")
-    # else:
-        # logging.info(f"Columns in fetched data: {data.columns.tolist()}")
     
     if not data.empty:
         data = data.iloc[::-1]  # Обратная сортировка по возрастанию времени
@@ -197,7 +115,7 @@ def get_intervals_predictions(first_open_time, last_open_time) -> pd.DataFrame:
     with open("../models/optimized_params.json", "r") as file:
         optimized_params = json.load(file)
     
-    intervals = optimized_params.keys()  # Например: ["1m", "5m", "15m", "1h"]
+    intervals = optimized_params.keys()  # Например: ["1d", "4h", "1h", "15m", "5m", "1m"]
     all_predictions = []
 
     for interval in intervals:
@@ -286,9 +204,6 @@ def aggregate_small_data(small_data: pd.DataFrame, interval: str) -> pd.DataFram
 
     aggregation_freq = freq_map[interval]
 
-    # print(f"small_data before aggregation: {len(small_data)}")
-    # print(f"small_data: {small_data}")
-
     # Агрегация данных по частоте
     aggregated = small_data.resample(aggregation_freq, on='open_time').agg({
         'low_price': 'min',  # Минимальная цена
@@ -313,9 +228,7 @@ def aggregate_small_data(small_data: pd.DataFrame, interval: str) -> pd.DataFram
     aggregated.reset_index(drop=True, inplace=True)
 
     logging.info(f"Aggregated small data: {aggregated.shape[0]} rows for interval {interval}.")
-    # print(f"Aggregated small data for interval: {interval}")
-    # print(aggregated[:5])
-    # print(len(aggregated))
+    
     return aggregated
 
 def normalize_small_data(small_data: pd.DataFrame, window_data: pd.DataFrame) -> pd.DataFrame:
@@ -385,15 +298,6 @@ def calculate_required_rows_for_small_interval(sequence_length: int, large_inter
     """
     Рассчитывает количество строк для малого интервала на основе sequence_length и старшего интервала.
     """
-    freq_map = {
-        "1d": "1D",
-        "4h": "1D",
-        "1h": "4h",
-        "15m": "1h",
-        "5m": "15min",
-        "1m": "5min"
-    }
-
     # Множители для пересчета
     MULTIPLIER = {
         ("1d", "4h"): 6,
@@ -410,98 +314,6 @@ def calculate_required_rows_for_small_interval(sequence_length: int, large_inter
     multiplier = MULTIPLIER.get((large_interval, small_interval), 1)
     required_rows = sequence_length * multiplier + multiplier  # Количество строк для малого интервала
     return required_rows
-
-def process_interval_pair(
-    high_interval: str, low_interval: str, 
-    high_sequence_length: int, low_sequence_length: int, 
-    last_timestamp: datetime
-) -> pd.DataFrame:
-    """
-    Обрабатывает пару интервалов: старший + младший.
-    :param high_interval: Старший интервал (например, '1d').
-    :param low_interval: Младший интервал (например, '4h').
-    :param high_sequence_length: Длина последовательности для старшего интервала.
-    :param low_sequence_length: Длина последовательности для младшего интервала.
-    :param last_timestamp: Последний временной штамп для синхронизации.
-    :return: DataFrame с объединенными данными и прогнозами.
-    """
-    # 1. Получаем нормализованные данные старшего интервала
-    high_data_query = f"""
-        SELECT * FROM binance_klines_normalized
-        WHERE data_interval = '{high_interval}'
-        AND open_time <= '{last_timestamp}'
-        ORDER BY open_time DESC
-        LIMIT {high_sequence_length};
-    """
-    high_data = execute_query(high_data_query)
-    if high_data.empty:
-        raise ValueError(f"No data found for high interval {high_interval}")
-    high_data = high_data.iloc[::-1]  # Сортировка по времени
-
-    # 2. Получаем ненормализованные данные младшего интервала
-    low_data_query = f"""
-        SELECT open_time, open_price, high_price, low_price, close_price, volume
-        FROM binance_klines
-        WHERE data_interval = '{low_interval}'
-        AND open_time <= '{last_timestamp}'
-        ORDER BY open_time DESC
-        LIMIT {low_sequence_length};
-    """
-    low_data = execute_query(low_data_query)
-    if low_data.empty:
-        raise ValueError(f"No data found for low interval {low_interval}")
-    low_data = low_data.iloc[::-1]  # Сортировка по времени
-
-    # 3. Синхронизация данных
-    combined_data = pd.merge_asof(
-        low_data.sort_values("open_time"),
-        high_data.sort_values("open_time"),
-        on="open_time",
-        direction="backward"
-    )
-
-    # 4. Прогон данных через модели
-    combined_features = combined_data.drop(columns=["open_time"]).values.astype(np.float32)
-
-    # Загружаем модели для интервалов
-    high_model = load_interval_model(high_interval, params={"sequence_length": high_sequence_length}, input_size=combined_features.shape[1])
-    low_model = load_interval_model(low_interval, params={"sequence_length": low_sequence_length}, input_size=combined_features.shape[1])
-
-    # Прогноз для старшего интервала
-    high_input = torch.tensor(combined_features[:high_sequence_length], dtype=torch.float32).unsqueeze(0).to("cuda")
-    high_prediction = high_model(high_input).cpu().detach().numpy()
-
-    # Прогноз для младшего интервала
-    low_input = torch.tensor(combined_features[-low_sequence_length:], dtype=torch.float32).unsqueeze(0).to("cuda")
-    low_prediction = low_model(low_input).cpu().detach().numpy()
-
-    # Возвращаем объединенные данные и прогнозы
-    combined_data["high_prediction"] = high_prediction.flatten()
-    combined_data["low_prediction"] = low_prediction.flatten()
-    return combined_data
-
-# def process_all_intervals(last_timestamp: datetime) -> pd.DataFrame:
-#     """
-#     Обрабатывает все пары интервалов и объединяет результаты.
-#     :param last_timestamp: Последний временной штамп.
-#     :return: DataFrame с прогнозами для всех пар интервалов.
-#     """
-#     interval_pairs = [("1d", "4h"), ("4h", "1h"), ("1h", "15m"), ("15m", "5m"), ("5m", "1m")]
-#     results = []
-
-#     for high_interval, low_interval in interval_pairs:
-#         logging.info(f"Processing interval pair: {high_interval} -> {low_interval}")
-#         params = load_optimized_params()  # Загружаем параметры моделей
-#         high_sequence_length = params[high_interval]["sequence_length"]
-#         low_sequence_length = params[low_interval]["sequence_length"]
-
-#         # Обработка пары интервалов
-#         result = process_interval_pair(high_interval, low_interval, high_sequence_length, low_sequence_length, last_timestamp)
-#         results.append(result)
-
-#     # Объединение всех данных
-#     all_data = pd.concat(results, ignore_index=True)
-#     return all_data
 
 def calculate_rows_for_interval(interval: str, sequence_length, first_open_time: datetime, last_open_time: datetime):
     """
@@ -531,25 +343,16 @@ def calculate_rows_for_interval(interval: str, sequence_length, first_open_time:
 def prepare_interval_data(interval: str, sequence_length, first_open_time: datetime, last_open_time: datetime) -> pd.DataFrame:
     logging.info(f"Fetching data for interval: {interval}, first_open_time: {first_open_time} and last_open_time: {last_open_time}")
 
-    # print("Before adjusting:")
-    # print(f"{interval} {first_open_time}")
-    # print(f"{interval} {last_open_time}")
-    # print("\n")
     first_open_time = adjust_interval_timestamp(interval, first_open_time)
     last_open_time = adjust_interval_timestamp(interval, last_open_time)
-    # print("After adjusting:")
-    # print(f"{interval} {first_open_time}")
-    # print(f"{interval} {last_open_time}")
-    # print("\n")
+    
     interval_sequence = calculate_rows_for_interval(interval, sequence_length, first_open_time, last_open_time)
-    # print(f"{interval} {interval_sequence} {sequence_length}")
 
     data = fetch_interval_data(interval, interval_sequence, last_open_time)
     window_data = get_active_window(interval)
     small_interval = get_small_interval(interval)
 
     required_rows = calculate_required_rows_for_small_interval(interval_sequence, interval)
-    # print(f"required_rowsrequired_rowsrequired_rows: {required_rows}")
 
     if small_interval is not None:
         small_data = fetch_small_interval_data(small_interval, last_open_time, required_rows)
@@ -559,33 +362,20 @@ def prepare_interval_data(interval: str, sequence_length, first_open_time: datet
     else:
         small_data = None
 
-    # print(f"Data: {data[:5]}")
-
     if data.empty:
         logging.warning("No data available, skipping trial.")
         return float("inf")
     
     if small_data is not None:
         aggregated_small_data = aggregate_small_data(small_data, small_interval)
-    # logging.info(f"Aggregated data: \n{aggregated_small_data}")
+        # logging.info(f"Aggregated data: \n{aggregated_small_data}")
         normalized_small_data = normalize_small_data(aggregated_small_data, window_data)
-        # print(f"Small Data: {normalized_small_data[:5]}")
-    # logging.info(f"Normalized data: \n{normalized_small_data}")
+        # logging.info(f"Normalized data: \n{normalized_small_data}")
         final_data = merge_large_and_small_data(data, normalized_small_data)
         final_data = final_data.drop(final_data.index[-1])
     else:
         final_data = data.copy()
-    
-    # print(f"Interval data for interval: {interval}")
-    # print(final_data[:5])
-    # print(final_data[5:])
-    # print(f"Final data {interval}: {final_data['open_time']}")
-    # logging.info(f"Final data: {final_data[:5]}")
-    # print(f"Len final_data: {len(final_data)}")
 
-    # if print(normalized_small_data):
-    #     print(normalized_small_data)
-    # print(f"last_open_time: {last_open_time}")
     return final_data
 
 def get_active_window(interval: str) -> pd.DataFrame:
@@ -598,29 +388,7 @@ def get_active_window(interval: str) -> pd.DataFrame:
     data = execute_query(query)
     if data.empty:
         logging.warning(f"No data found for window interval {interval}")
-    # else:
-        # logging.info(f"Columns in fetched data: {data.columns.tolist()}")
 
-    return data
-
-def fetch_interval_sequence(interval: str, sequence_length: int, timestamp: datetime) -> pd.DataFrame:
-    """
-    Получение последовательности данных для указанного интервала.
-    :param interval: Интервал данных (например, '1d', '1h').
-    :param sequence_length: Длина последовательности.
-    :param timestamp: Временная метка последней записи стакана.
-    :return: Данные интервала за sequence_length записей.
-    """
-    adjusted_timestamp = adjust_interval_timestamp(interval, timestamp)
-    query = f"""
-        SELECT * FROM binance_klines_normalized
-        WHERE data_interval = '{interval}' AND open_time <= '{adjusted_timestamp}'
-        ORDER BY open_time DESC
-        LIMIT {sequence_length}
-    """
-    data = execute_query(query)
-    if not data.empty:
-        data = data.iloc[::-1]  # Реверсируем, чтобы данные были в хронологическом порядке
     return data
 
 def adjust_interval_timestamp(interval: str, timestamp: datetime) -> datetime:
@@ -658,90 +426,31 @@ def prepare_data(orderbook_data: pd.DataFrame, sequence_length: int) -> tuple:
     first_open_time = orderbook_data.iloc[0]["timestamp"]  # Первый элемент
     last_open_time = orderbook_data.iloc[-1]["timestamp"]  # Последний элемент
 
-    # print("Первый timestamp:", first_open_time)
-    # print("Последний timestamp:", last_open_time)
-
     intervals_predictions = get_intervals_predictions(first_open_time, last_open_time)
-    # print(f"intervals_predictions: \n{intervals_predictions}")
-    # intervals_predictions.index = pd.to_datetime(intervals_predictions.index)
 
     for i in range(len(orderbook_data) - sequence_length):
         # Извлечение последовательности стакана
         orderbook_sequence = orderbook_data.iloc[i:i + sequence_length].drop(columns=["id", "timestamp"]).values.astype(np.float32)
-        # last_timestamp = timestamps.iloc[sequence_length - 1]
-        # orderbook_sequence = orderbook_sequence.drop(columns=["id", "timestamp"]).values.astype(np.float32)
-
         # Последняя временная метка текущей последовательности стакана
         last_timestamp = orderbook_data.iloc[i + sequence_length - 1]["timestamp"]
         # print(f"last_timestamp: {last_timestamp}")
-
         # Фильтруем прогнозы по интервалам, даты которых <= last_timestamp
         filtered_predictions = intervals_predictions[intervals_predictions["timestamp"] <= last_timestamp]
-
         # Если нужны только последние прогнозы по каждому интервалу
         latest_predictions = filtered_predictions.groupby("interval").tail(1)
-
         # Объединяем все прогнозы в одну строку
         combined_predictions = np.concatenate(latest_predictions["prediction"].values)
-
         # Преобразуем `combined_predictions` в двумерный массив
         combined_predictions = combined_predictions.reshape(1, -1)
-
-        # Диагностика orderbook_sequence
-        # print(f"orderbook_sequence shape: {orderbook_sequence.shape}")
-        # print(f"orderbook_sequence sample:\n{orderbook_sequence[:5]}")
-
-        # Диагностика combined_predictions
-        # print(f"combined_predictions shape: {combined_predictions.shape}")
-        # print(f"combined_predictions:\n{combined_predictions}")
-
         # Повторяем `combined_predictions` по количеству строк в `orderbook_sequence`
         repeated_predictions = np.tile(combined_predictions, (orderbook_sequence.shape[0], 1))
 
-        # Добавляем прогнозы как новую строку к данным стакана
-        # combined_data = np.hstack((orderbook_sequence, combined_predictions))
-        # Проверка их совместимости для hstack
         try:
             # Объединяем массивы
             combined_data = np.hstack((orderbook_sequence, repeated_predictions))
-            # print("Combined data shape (test):", combined_data.shape)
-            # print(f"combined_predictions:\n{combined_predictions}")
-            # print(f"orderbook_sequence sample:\n{orderbook_sequence[:5]}")
-            # print(f"combined_data:\n{combined_data}")
 
-            # logging.info(f"combined_predictions:\n{combined_predictions}")
-            # logging.info(f"combined_predictions shape:\n{combined_predictions.shape}")
-            # logging.info(f"orderbook_sequence sample:\n{orderbook_sequence[:5]}")
-            # logging.info(f"orderbook_sequence sample shape:\n{orderbook_sequence.shape}")
-            # logging.info(f"combined_data:\n{combined_data[:5]}")
-            # logging.info(f"combined_data shape:\n{combined_data.shape}")
-            # logging.info("\n")
-
-            # np.savetxt("combined_predictions.txt", combined_predictions, delimiter=",")
-            # np.savetxt("orderbook_sequence.txt", orderbook_sequence, delimiter=",")
-            # np.savetxt("combined_data.txt", combined_data, delimiter=",")
-            # print(intervals_predictions)
-
-            # combined_predictions_str = "\n".join([",".join(map(str, row)) for row in combined_predictions])
-            # orderbook_sequence_str = "\n".join([",".join(map(str, row)) for row in orderbook_sequence])
-            # combined_data_str = "\n".join([",".join(map(str, row)) for row in combined_data])
-
-            # # Открываем файлы в режиме "a" (append) для добавления новых данных
-            # with open("combined_predictions.txt", "a") as f_pred:
-            #     f_pred.write(combined_predictions_str + "\n")
-
-            # with open("orderbook_sequence.txt", "a") as f_seq:
-            #     f_seq.write(orderbook_sequence_str + "\n")
-
-            # with open("combined_data.txt", "a") as f_data:
-            #     f_data.write(combined_data_str + "\n")
         except ValueError as e:
             print(f"Ошибка при hstack: {e}")
-        # print(f"combined_data: {combined_data}")
-        # print(f"combined_data shape: {combined_data.shape}")
-        
-        # print("Shape orderbook_sequence:", orderbook_sequence.shape)
-        # print("Shape intervals_predictions:", intervals_predictions.shape)
 
         # Извлечение прогнозируемых `low_price_normalized` и `high_price_normalized`
         # Последние два значения в combined_predictions (исходя из описания)
@@ -783,11 +492,6 @@ def objective(trial):
     
     logging.info(f"Trial parameters - hidden_size: {hidden_size}, num_layers: {num_layers}, dropout: {dropout}, learning_rate: {learning_rate}, sequence_length: {sequence_length}, batch_size: {batch_size}")
     
-    # prepare_data(orderbook_data, sequence_length)
-
-    # combined_data = align_data(orderbook_data, intervals_predictions)
-
-    # Шаг 4: Обучение модели с объединенными данными
     X, y = prepare_data(orderbook_data, sequence_length)
     logging.info(f"Prepared data for training. Features: {X.shape}, Targets: {y.shape}")
     # print(f"Prepared data for training. Features: {X.shape}, Targets: {y.shape}")
@@ -815,46 +519,21 @@ def objective(trial):
         epoch_loss = 0
 
         for X_batch, y_batch in train_loader:
-            # Индексы текущего батча в тренировочных данных
-            # batch_start = batch_index * batch_size
-            # batch_end = batch_start + len(X_batch)
-
             # Основной цикл обучения
             X_batch, y_batch = X_batch.to("cuda"), y_batch.to("cuda")
-            # y_batch = y_batch.view(-1, 1)
             optimizer.zero_grad()
             y_pred = orderbook_model(X_batch)
             loss = criterion(y_pred, y_batch)
-
-            # if epoch == epochs - 1:  # Для последней эпохи
-            #     logging.info(f"Last 5 rows from training set before batch prediction: {X_train[-5:]}")
-                # logging.info(f"Last 5 targets from training set before batch prediction: {y_train[-5:]}")
-
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
 
-            # Извлекаем оригинальные данные из X_train и y_train
-            # original_X_batch = X_train[batch_start:batch_end, -1][-1]
-            # original_y_batch = y_train[batch_start:batch_end][-1]
-            # last_pred = y_pred[-1].item()  # Последнее предсказание из модели
-            # last_target = y_batch[-1].item()  # Последняя цель
-            # Логируем для проверки
-            # logging.info(f"Batch index: {batch_index}")
-            # logging.info(f"Original X_batch from X_train:{original_X_batch}")
-            # logging.info(f"Original y_batch from y_train: {original_y_batch}")
-            # logging.info(f"Model prediction for last sequence in batch: {last_pred}")
-            # logging.info(f"Target for last sequence in batch: {last_target}")
-
             # Увеличиваем счетчик батча
             batch_index += 1
-
-
 
         # Сброс счетчика батча для следующей эпохи
         batch_index = 0
         logging.info(f"Epoch {epoch + 1} completed, Train Loss: {epoch_loss / len(train_loader):.14f}")
-
 
         # Пример прогноза после каждой эпохи
         orderbook_model.eval()
@@ -896,54 +575,14 @@ def objective(trial):
 
             # Сохраняем DataFrame в CSV-файл
             train_results_df.to_csv(filename, mode="a", index=False, header=not os.path.exists(filename))
-            # train_results_cup_data_str = "\n".join([",".join(map(str, row)) for row in train_results_df])
-
-            # # Открываем файлы в режиме "a" (append) для добавления новых данных
-            # with open("train_results_cup_data.txt", "a") as f_pred:
-            #     f_pred.write(train_results_cup_data_str + "\n")
-
             logging.info(f"Results DataFrame for last 5 rows:\n{train_results_df}")
-            # Логируем последние 5 строк из тренировочной выборки
-            # train_sample_data = X_train[-5:]  # Последние 5 строк из X_train
-            # train_times = times_train[-5:]  # Последние 5 временных меток из times_train
-            # train_targets = y_train[-5:]  # Последние 5 целевых значений из y_train
-
-            # batch_sample_data = X_batch[-5:]  # Последние 5 строк из X_train
-            # batch_targets = y_batch[-5:]  # Последние 5 целевых значений из y_train
-
-            # Если нужно предсказать на тренировочных данных (для проверки)
-            # train_sample_data_tensor = torch.tensor(train_sample_data, dtype=torch.float32).to("cuda")
-            # train_predictions = model(train_sample_data_tensor).cpu().numpy()
-
-            # Денормализация предсказаний и фактических значений
-            # denormalized_train_preds = [denormalize(pred[0], min_value, max_value) for pred in train_predictions]
-            # denormalized_train_targets = [denormalize(value, min_value, max_value) for value in train_targets]
-
-            # Формируем DataFrame для последних 5 строк тренировочной выборки
-            # train_results_df = pd.DataFrame({
-            #     "open_time": [time[0] for time in train_times],
-            #     "close_time": [time[1] for time in train_times],
-            #     # "batch_sample_data": [time[0] for time in batch_sample_data],
-            #     # "batch_targets": [time[1] for time in batch_targets],
-            #     "predicted_close": denormalized_train_preds,
-            #     "actual_close": denormalized_train_targets
-            # })
-            # logging.info(f"Results DataFrame for Epoch {epoch + 1}:\n{train_results_df}")
-
-    # Остальной код без изменений...
 
     orderbook_model.eval()
     val_loss = 0.0
     with torch.no_grad():
         for X_batch, y_batch in val_loader:
             X_batch, y_batch = X_batch.to("cuda"), y_batch.to("cuda")
-            # y_batch = y_batch.view(-1, 1)
             y_pred = orderbook_model(X_batch)
-
-            # Логируем предсказания и целевые значения для первых 5 примеров в батче
-            # logging.info(f"Validation predictions: {y_pred.detach().cpu().numpy()[:5]}")
-            # logging.info(f"Validation targets: {y_batch.detach().cpu().numpy()[:5]}")
-
             loss = criterion(y_pred, y_batch)
             val_loss += loss.item()
 
@@ -957,7 +596,7 @@ def add_null_row_to_csv(filename):
     null_row = pd.DataFrame([["NULL"] * 14])  # 14 соответствует количеству колонок в DataFrame
     null_row.to_csv(filename, mode="a", index=False, header=False)
 
-async def main():
+def main():
     logging.info("Starting hyperparameter optimization")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=35)  # 50 испытаний для оптимизации
@@ -966,4 +605,4 @@ async def main():
     logging.info(f"Optimization completed - Best Params: {study.best_params}, Best Loss: {study.best_value:.14f}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

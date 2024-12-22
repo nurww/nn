@@ -1,0 +1,10 @@
+{
+    "orderbook": {
+        "hidden_size": 224,
+        "num_layers": 3,
+        "dropout": 0.10694555468444111,
+        "learning_rate": 8.426369388849522e-05,
+        "sequence_length": 42,
+        "batch_size": 71
+    }
+}

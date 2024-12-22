@@ -11,3 +11,4 @@ logs/
 *.csv
 *.xls
 *.xlsx
+*acc_config.json
