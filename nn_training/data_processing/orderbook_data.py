@@ -21,7 +21,7 @@ MYSQL_CONFIG = {
 }
 
 FIXED_BOUNDARIES = {
-    "mid_price": {"min": 0, "max": 120000},
+    "mid_price": {"min": 0, "max": 115000},
     "sum_bid_volume": {"min": 0, "max": 30000},
     "sum_ask_volume": {"min": 0, "max": 30000},
     "imbalance": {"min": -1, "max": 1}
@@ -29,7 +29,7 @@ FIXED_BOUNDARIES = {
 
 # Настройка логирования
 logging.basicConfig(
-    filename='../../logs/normalized_order_book_detailed.log',
+    filename='logs/normalized_order_book_detailed.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     encoding='utf-8'

@@ -487,10 +487,10 @@ def objective(trial):
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
     sequence_length = trial.suggest_int("sequence_length", 30, 100)
     batch_size = trial.suggest_int("batch_size", 32, 128, log=True)
-
-    orderbook_data = fetch_orderbook_data()
     
     logging.info(f"Trial parameters - hidden_size: {hidden_size}, num_layers: {num_layers}, dropout: {dropout}, learning_rate: {learning_rate}, sequence_length: {sequence_length}, batch_size: {batch_size}")
+    
+    orderbook_data = fetch_orderbook_data()
     
     X, y = prepare_data(orderbook_data, sequence_length)
     logging.info(f"Prepared data for training. Features: {X.shape}, Targets: {y.shape}")

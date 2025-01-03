@@ -10,7 +10,6 @@ import pandas as pd
 import json
 import logging
 from datetime import datetime
-import optuna
 
 # Добавляем текущий путь к проекту в sys.path для корректного импорта
 amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

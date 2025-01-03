@@ -433,8 +433,8 @@ def objective(trial):
             val_loss += loss.item()
 
     avg_val_loss = val_loss / len(val_loader)
-    logging.info(f"Validation Loss: {avg_val_loss:.4f}")
-    print(f"Validation Loss for trial: {avg_val_loss:.4f}")
+    logging.info(f"Validation Loss: {avg_val_loss:.14f}")
+    print(f"Validation Loss for trial: {avg_val_loss:.14f}")
     return avg_val_loss
 
 def main():
@@ -443,7 +443,7 @@ def main():
     study.optimize(objective, n_trials=50)  # 50 испытаний для оптимизации
     print("Лучшие гиперпараметры:", study.best_params)
     print("Лучшее значение потерь:", study.best_value)
-    logging.info(f"Optimization completed - Best Params: {study.best_params}, Best Loss: {study.best_value:.4f}")
+    logging.info(f"Optimization completed - Best Params: {study.best_params}, Best Loss: {study.best_value:.14f}")
 
 if __name__ == "__main__":
     main()
