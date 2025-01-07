@@ -32,6 +32,14 @@ logging.basicConfig(
     encoding='utf-8'
 )
 
+def denormalize(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = 0
+    max_value = 115000
+    return value * (max_value - min_value) + min_value
+
 class TradingEnvironment:
     def __init__(self, X, initial_spot_balance=50, initial_futures_balance=50):
         """
@@ -41,21 +49,18 @@ class TradingEnvironment:
             raise ValueError("Input data X must be a 2D numpy array.")
         self.X = X
         self.current_step = 0  # Текущая позиция в данных
-        # self.state_size = X.shape[1]
-        self.state_size = 140
-        # print(f"self.state_size: {self.state_size}")
-        # print(f"X.shape: {X.shape}")
+        self.state_size = 141
         self.spot_balance = initial_spot_balance
         self.futures_balance = initial_futures_balance
-        self.leverage = 100
+        self.prev_total_balance = initial_spot_balance + initial_futures_balance  # Инициализация
+        self.leverage = 50
         self.positions = []
         self.trade_log = []
         self.prev_pnl = 0
         self.pnl = 0      # Текущий общий PnL
         self.current_price = 0  # Текущая рыночная цена
-        # Вызов проверки структуры данных X
-        # self.validate_X_structure()   
 
+    # Вызов проверки структуры данных X    
     def validate_X_structure(self):
         """
         Проверяет структуру self.X на корректность.
@@ -73,6 +78,31 @@ class TradingEnvironment:
 
         print("Validation passed! Structure of X is correct.")
 
+    def analyze_trends(self):
+        """
+        Анализ трендов для 5-минутного и 1-минутного интервалов.
+        """
+        return {
+            "5m_trend_diff": self.X[self.current_step][96],  # trend_price_difference для 5 минут
+            "5m_trend_strength": self.X[self.current_step][98],  # trend_strength для 5 минут
+            "1m_trend_diff": self.X[self.current_step][118],  # trend_price_difference для 1 минуты
+            "1m_trend_strength": self.X[self.current_step][120]  # trend_strength для 1 минуты
+        }
+
+    def adjust_stop_loss_take_profit(self, position):
+        """
+        Динамическая коррекция уровней stop-loss и take-profit.
+        """
+        trends = self.analyze_trends()
+        position["stop_loss"] = min(self.X[self.current_step][94], self.X[self.current_step][116]) * 0.98  # Уменьшаем stop_loss
+        position["take_profit"] = max(self.X[self.current_step][95], self.X[self.current_step][117]) * 1.02  # Увеличиваем take_profit
+
+        # Дополнительная коррекция на основе краткосрочных трендов
+        if trends["1m_trend_strength"] < 0:
+            position["stop_loss"] *= 0.97  # Сильное уменьшение при негативном тренде
+        if trends["1m_trend_strength"] > 0:
+            position["take_profit"] *= 1.03  # Сильное увеличение при положительном тренде
+
     def reset(self):
         """
         Сброс среды до начального состояния.
@@ -80,8 +110,13 @@ class TradingEnvironment:
         self.current_step = 0
         self.spot_balance = 50
         self.futures_balance = 50
+        self.prev_total_balance = 50 + 50  # Инициализация
+        self.leverage = 50
         self.positions = []
         self.trade_log = []
+        self.prev_pnl = 0
+        self.pnl = 0      # Текущий общий PnL
+        self.current_price = 0  # Текущая рыночная цена
         logging.info("Environment reset.")
         state = self._get_state()
         if not isinstance(state, dict) or "positions" not in state:
@@ -102,7 +137,8 @@ class TradingEnvironment:
                     float(self.spot_balance),
                     float(self.futures_balance),
                     float(self.leverage),
-                    float(len(self.positions))
+                    float(len(self.positions)),
+                    float(self.current_step - self.positions[0]["entry_step"] if self.positions else 0)  # Длительность удержания
                 ], dtype=np.float32),
                 row_data
             ]),
@@ -123,93 +159,109 @@ class TradingEnvironment:
         
         # Обновление текущей цены
         self.current_price = self.X[self.current_step][0]  # Цена текущей свечи
+        trends = self.analyze_trends()
         # logging.info(f"Current price: {self.current_price}")
 
-        # Выполнение действия
         if action[0] == 0:  # Open Long
-            # print("Opening Long position")
-            self._open_position("long")
+            if trends["5m_trend_strength"] > 0 and trends["1m_trend_strength"] > 0:
+                self._open_position("long")
+            else:
+                reward -= 0.1  # Штраф за неправильное решение
         elif action[0] == 1:  # Open Short
-            # print("Opening Short position")
-            self._open_position("short")
+            if trends["5m_trend_strength"] < 0 and trends["1m_trend_strength"] < 0:
+                self._open_position("short")
+            else:
+                reward -= 0.1
         elif action[0] == 2:  # Close Positions
-            positions_to_close = action[1]
-            total_pnl, closed, errors = self._close_positions(positions_to_close)
-            # print(f"Closed positions: {closed}, Errors: {errors}")
-            reward += total_pnl
+            total_pnl, closed, errors = self._close_positions()
+            reward += total_pnl * 0.1
         elif action[0] == 3:  # Transfer from spot to futures
             # print("Transferring balance from Spot to Futures")
-            reward -= self._transfer_balance("spot_to_futures")
+            self._transfer_balance("spot_to_futures")
+            reward -= 1  # Штраф за перевод
         elif action[0] == 4:  # Transfer from futures to spot
             # print("Transferring balance from Futures to Spot")
-            reward -= self._transfer_balance("futures_to_spot")
-        elif action[0] == 5:  # Ожидание
+            self._transfer_balance("futures_to_spot")
+            reward -= 1  # Штраф за перевод
+        elif action[0] == 5:  # Hold
             for position in self.positions:
-                self.pnl = self._calculate_pnl(position)
-                reward += self._calculate_reward(position)
-                self._update_futures_balance_with_pnl()
-            # total_pnl = 0
-
-            # # for i, position in enumerate(self.positions):
-            # #     try:
-            # #         pnl = self._calculate_pnl(position)
-            # #         total_pnl += pnl
-            # #     except Exception as e:
-            # #         errors.append((i, str(e)))
-            # for i, position in enumerate(self.positions):
-            #     self.pnl = self._calculate_pnl(position)
-            #     reward += self._calculate_reward(position)
-
-            # total_pnl -= abs(total_pnl) * 0.001  # Учет комиссии
-            # self.pnl = total_pnl
-
-            # # Относительное изменение PnL
-            # if self.prev_pnl != 0:
-            #     pnl_change = (self.pnl - self.prev_pnl) / abs(self.prev_pnl)
-            # else:
-            #     pnl_change = 0  # Если prev_pnl равен 0
-
-            # # Награда пропорциональна изменению
-            # reward = pnl_change
-
-            # # Обновляем prev_pnl для следующего шага
-            # self.prev_pnl = self.pnl
-
-        # **Добавляем штраф за бездействие**
-        penalty_for_inactivity = 0.05  # Вы можете настроить размер штрафа
-        if len(self.positions) > 0 and reward == 0:
-            reward -= penalty_for_inactivity
-        # Проверка ликвидации
-        self._check_liquidation()
+                reward += self._calculate_pnl(position) * 0.005
+        
+        # Логика удержания позиций
+        for position in self.positions:
+            self.adjust_stop_loss_take_profit(position)
+            position["hold_time"] = (self.current_step - position["entry_step"]) * 100
+            if position["hold_time"] < 250:  # Минимальное время удержания
+                continue  # Пропускаем закрытие позиции
+            if position["direction"] == "long" and self.current_price <= position["stop_loss"]:
+                self._close_positions()
+            elif position["direction"] == "long" and self.current_price >= position["take_profit"]:
+                self._close_positions()
+            elif position["direction"] == "short" and self.current_price >= position["stop_loss"]:
+                self._close_positions()
+            elif position["direction"] == "short" and self.current_price <= position["take_profit"]:
+                self._close_positions()
+                
+        # Вознаграждение за общий баланс
+        total_balance = self.spot_balance + self.futures_balance
+        reward += (total_balance - self.prev_total_balance) * 0.05
+        self.prev_total_balance = total_balance
+        
+        # Штраф за ликвидацию через reward
+        if self._check_liquidation():
+            reward -= 10  # Штраф за ликвидацию
+        
         # Логируем состояние после выполнения действия
         self._log_balances()
+        
         # Переход на следующий шаг
         self.current_step += 1
-        next_state = self._get_state()
         # print(f"Next state: {next_state[:10]}... (truncated), Reward: {reward}, Done: {done}")
-        logging.info(f"Step: {self.current_step}, Action: {action}, Reward: {reward}, Total Reward: {self.pnl}")
+        # logging.info(f"Step: {self.current_step}, Action: {action}, Reward: {reward}, Total Reward: {self.pnl}")
+        # Логируем состояние только каждые 100 шагов
+        if self.current_step % 100 == 0:
+            logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
+                        f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
+            if self.positions:
+                for i, position in enumerate(self.positions, start=1):
+                    logging.info(f"Position {i}: {position}")
 
-        return next_state, reward, done
+        return self._get_state(), reward, done
 
     def _open_position(self, direction):
-        """
-        Открытие позиции.
-        """
-        # Ограничение количества позиций
-        if len(self.positions) >= 5:
-            # print("Cannot open new position: position limit reached.")
-            logging.warning("Cannot open new position: position limit reached.")
+        # Проверка наличия активных позиций
+        if len(self.positions) >= 1:  # Ограничение на одну активную позицию
+            logging.warning("Position not opened: An active position already exists.")
             return
         
+        # Максимальная доля от баланса, которую можно использовать
+        max_risk_percent = 0.02  # 2% риска на сделку
+        min_position_size = 10  # Минимальный размер позиции
+        max_position_size = self.futures_balance * 0.8  # Максимум 80% от баланса
+
+        # Уверенность модели (например, трендовая сила)
+        trend_strength = self.X[self.current_step][98]  # Используем `trend_strength` из 5-минутного интервала
+        confidence_factor = max(0.1, min(1.0, abs(trend_strength)))  # Нормализуем уверенность от 0.1 до 1.0
+
+        # Рассчитываем базовый размер позиции
+        base_position_size = self.futures_balance * max_risk_percent * confidence_factor
+
+        # Устанавливаем окончательный размер позиции в пределах лимитов
+        position_size = float(max(min(base_position_size, max_position_size), min_position_size))
+
         if self.futures_balance <= 0:
             logging.warning("Insufficient futures balance to open position.")
             return
-        
-        # Преобразуем данные в скаляр, если это массив
-        position_size = float(min(self.futures_balance * 0.5, self.futures_balance * self.leverage))
+
+        if position_size > self.futures_balance * self.leverage:
+            position_size = self.futures_balance * self.leverage  # Ограничиваем плечом
+
         liquidation_price = self._calculate_liquidation_price(position_size, direction)
 
-        # Добавление уникального ID для позиции
+        # Установка stop-loss и take-profit
+        stop_loss = self.X[self.current_step][94]  # low_price_normalized из 5-минутного интервала
+        take_profit = self.X[self.current_step][95]  # high_price_normalized из 5-минутного интервала
+
         position_id = len(self.positions) + 1
 
         self.positions.append({
@@ -217,36 +269,137 @@ class TradingEnvironment:
             "entry_price": self.current_price,
             "position_size": position_size,
             "direction": direction,
-            "liquidation_price": liquidation_price
+            "liquidation_price": liquidation_price,
+            "entry_step": self.current_step,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "hold_time": 0  # Инициализация времени удержания
         })
-        logging.info(f"Opened {direction} position ID {position_id}: Entry price: {self.current_price}, Size: {position_size}, "
-                 f"Liquidation price: {liquidation_price}")
 
-    def _close_positions(self, positions_to_close):
+        self.trade_log.append({
+            "action": "open",
+            "step": self.current_step,
+            "entry_price": self.current_price,
+            "direction": direction
+        })
+
+        logging.info(
+            f"Opened {direction} - Entry price: {self.current_price:.5f}, "
+            f"Size: {position_size:.5f}, Liquidation price: {liquidation_price:.5f}, "
+        )
+
+        logging.info(
+            f"Confidence factor: {confidence_factor:.5f}, "
+            f"Futures balance: {self.futures_balance:.5f}"
+        )
+
+        logging.info(
+            f"Stop loss: {stop_loss:.5f}, Take profit: {take_profit:.5f}, "
+        )
+
+    def _close_positions(self):
         successfully_closed = []
         errors = []
         total_pnl = 0
         remaining_positions = []
 
-        for i, position in enumerate(self.positions):
-            if i in positions_to_close:
-                try:
-                    pnl = self._calculate_pnl(position)  # Вычисляем PnL
-                    total_pnl += pnl
-                    self.futures_balance += pnl  # Обновляем баланс
-                    successfully_closed.append(i)
-                    logging.info(f"Closed position ID {position['position_id']}: PnL: {pnl:.2f}, Updated Futures balance: {self.futures_balance:.2f}")
-                except Exception as e:
-                    errors.append((i, str(e)))
-                    logging.error(f"Error closing position ID {position['position_id']}: {e}")
-            else:
-                remaining_positions.append(position)
+        # Устанавливаем комиссию как долю от размера позиции
+        commission_rate = 0.1  # 0.1% комиссии как на Binance
 
-        total_pnl -= abs(total_pnl) * 0.001  # Учет комиссии
+        for i, position in enumerate(self.positions):
+            try:
+                # Рассчитываем PnL для позиции
+                pnl = self._calculate_pnl(position)
+                # Вычисляем комиссию
+                position_size = position.get("position_size", 0)
+                commission = position_size * commission_rate
+                # Уменьшаем PnL на размер комиссии
+                pnl -= commission
+
+                # Обновляем фьючерсный баланс с учетом PnL
+                total_pnl += pnl
+                self.futures_balance += pnl
+                successfully_closed.append(i)
+
+                logging.info(
+                    f"Closed position - PnL: {pnl:.5f} (after commission: {commission:.5f}), "
+                    f"Updated Futures balance: {self.futures_balance:.5f}"
+                )
+            except Exception as e:
+                errors.append((i, str(e)))
+                logging.error(f"Error closing position {i}: {e}")
+            finally:
+                # Логирование закрытия сделки
+                self.trade_log.append({
+                    "action": "close",
+                    "entry_step": position.get("entry_step", self.current_step - 1),  # Корректный шаг входа
+                    "step": self.current_step,  # Текущий шаг как шаг закрытия
+                    "entry_price": position.get("entry_price", "N/A"),
+                    "exit_price": self.current_price,
+                    "position_size": position_size,
+                    "pnl": pnl,  # PnL уже учитывает комиссию
+                    "commission": commission,
+                    "exit_spot_balance": self.spot_balance,
+                    "exit_futures_balance": self.futures_balance
+                })
+
+        # Учет дополнительной комиссии на общий PnL (опционально)
+        total_pnl -= abs(total_pnl) * commission_rate  # Если нужно еще одно снижение общего PnL
         self.pnl = total_pnl
+
+        # Обновляем оставшиеся позиции
         self.positions = remaining_positions
 
         return total_pnl, successfully_closed, errors
+
+    def generate_trade_report(self):
+        """
+        Генерация отчета по сделкам на основе trade_log.
+        """
+        report_data = []
+
+        # Проходим по каждому логу в trade_log
+        for log in self.trade_log:
+            if log["action"] == "close":
+                # Собираем данные для отчета
+                report_data.append({
+                    "Вход (шаг)": log.get("entry_step", "N/A"),
+                    "Выход (шаг)": log.get("step", "N/A"),
+                    "Цена входа": log.get("entry_price", "N/A"),
+                    "Цена выхода": log.get("exit_price", "N/A"),
+                    "Прибыль/Убыток": log.get("pnl", "N/A"),
+                    "Размер позиции": log.get("position_size", "N/A"),
+                    "Комиссия": log.get("commission", "N/A"),
+                    "Stop Loss": log.get("stop_loss", "N/A"),
+                    "Take Profit": log.get("take_profit", "N/A"),
+                    "Конечный баланс (Spot)": log.get("exit_spot_balance", "N/A"),
+                    "Конечный баланс (Futures)": log.get("exit_futures_balance", "N/A"),
+                })
+
+
+        # Проверяем, есть ли данные для отчета
+        if not report_data:
+            logging.warning("Trade log is empty. No data for report.")
+            return pd.DataFrame()  # Возвращаем пустой DataFrame, если лог пуст
+
+        # Создаем DataFrame из данных
+        trade_report = pd.DataFrame(report_data)
+
+        # Добавляем метрику
+        trade_report["Win"] = trade_report["Прибыль/Убыток"].apply(lambda x: 1 if x > 0 else 0)
+        win_rate = trade_report["Win"].mean() if not trade_report.empty else 0
+        profitability_ratio = trade_report["Прибыль/Убыток"].sum() / max(trade_report["Прибыль/Убыток"].abs().sum(), 1)
+
+        logging.info(f"Spot balance: {self.spot_balance}, Futures balance: {self.futures_balance}")
+        # Логируем метрики
+        logging.info(f"Win Rate: {win_rate:.2f}, Profitability Ratio: {profitability_ratio:.2f}")
+
+        # Настройки pandas для отображения
+        pd.set_option("display.max_rows", None)
+        pd.set_option("display.max_columns", None)
+        pd.set_option("display.width", 1000)
+
+        return trade_report
 
     def _update_futures_balance_with_pnl(self):
         """
@@ -257,92 +410,61 @@ class TradingEnvironment:
         # logging.info(f"Updated Futures balance with PnL: {self.futures_balance:.2f}")
 
     def _log_balances(self):
-        logging.info(f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
+        # logging.info(f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
         # for position in self.positions:
             # logging.info(f"Position: {position}")
-
-    # def _close_positions(self, positions_to_close):
-    #     successfully_closed = []
-    #     errors = []
-    #     total_pnl = 0
-    #     remaining_positions = []
-
-    #     for i, position in enumerate(self.positions):
-    #         if i in positions_to_close:
-    #             try:
-    #                 pnl = self._calculate_pnl(position)  # Вычисляем PnL
-    #                 total_pnl += pnl
-    #                 successfully_closed.append(i)
-    #                 # Обновляем фьючерсный баланс с учетом PnL
-    #                 self.futures_balance += pnl
-    #                 logging.info(f"Closed position ID {position['position_id']}: PnL: {pnl}, "
-    #                             f"Updated Futures balance: {self.futures_balance}")
-    #             except Exception as e:
-    #                 errors.append((i, str(e)))
-    #                 logging.error(f"Error closing position ID {position['position_id']}: {e}")
-    #         else:
-    #             remaining_positions.append(position)
-
-    #     total_pnl -= abs(total_pnl) * 0.001  # Учет комиссии
-    #     self.pnl = total_pnl
-    #     self.positions = remaining_positions
-
-    #     return total_pnl, successfully_closed, errors
+        return
 
     def _transfer_balance(self, direction):
         """
-        Перемещает средства между spot и futures с учетом активных позиций.
+        Перемещает средства между spot и futures с учетом активных позиций и минимальной необходимости.
         """
         transfer_amount = 0
+        min_transfer_threshold = 5  # Минимальная сумма перевода
+
         if direction == "spot_to_futures":
-            # Убедимся, что не забираем слишком много со spot
-            transfer_amount = min(self.spot_balance * 0.1, self.spot_balance)
-            self.spot_balance -= transfer_amount
-            self.futures_balance += transfer_amount
+            # Убедимся, что перевод имеет смысл
+            if self.spot_balance > min_transfer_threshold:
+                transfer_amount = min(self.spot_balance * 0.1, self.spot_balance)
+                self.spot_balance -= transfer_amount
+                self.futures_balance += transfer_amount
+            else:
+                logging.info("Spot balance too low for transfer to futures.")
         elif direction == "futures_to_spot":
-            # Убедимся, что есть достаточно маржи для поддержания открытых позиций
+            # Убедимся, что есть достаточно маржи для открытых позиций
             min_required_margin = sum(pos["position_size"] / self.leverage for pos in self.positions)
-            transfer_amount = min(self.futures_balance * 0.1, self.futures_balance - min_required_margin)
-            if transfer_amount < 0:
-                logging.warning("Cannot transfer funds, insufficient margin for open positions.")
-                return 0
-            self.futures_balance -= transfer_amount
-            self.spot_balance += transfer_amount
+            if self.futures_balance - min_required_margin > min_transfer_threshold:
+                transfer_amount = min(self.futures_balance * 0.1, self.futures_balance - min_required_margin)
+                self.futures_balance -= transfer_amount
+                self.spot_balance += transfer_amount
+            else:
+                logging.info("Futures balance too low or insufficient margin for transfer to spot.")
 
-        logging.info(f"Transferred {transfer_amount:.2f} from {direction.replace('_', ' ')}. "
-                    f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
+        if transfer_amount > 0:
+            logging.info(f"Transferred {transfer_amount:.2f} from {direction.replace('_', ' ')}. "
+                        f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
         return transfer_amount
-
-    # def _transfer_balance(self, direction):
-    #     """
-    #     Перемещение средств между кошельками.
-    #     """
-    #     transfer_amount = self.spot_balance * 0.1 if direction == "spot_to_futures" else self.futures_balance * 0.1
-    #     if direction == "spot_to_futures" and self.spot_balance >= transfer_amount:
-    #         self.spot_balance -= transfer_amount
-    #         self.futures_balance += transfer_amount
-    #     elif direction == "futures_to_spot" and self.futures_balance >= transfer_amount:
-    #         self.futures_balance -= transfer_amount
-    #         self.spot_balance += transfer_amount
-    #     logging.info(f"Transferred {transfer_amount:.2f} from {direction.replace('_', ' ')}. "
-    #                  f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
-    #     return transfer_amount
 
     def _calculate_liquidation_price(self, position_size, direction):
         """
-        Вычисление ликвидационной цены для позиции.
+        Рассчитывает ликвидационную цену для позиции.
         """
-        maintenance_margin_rate = 0.005  # Уровень маржи для ликвидации (например, 0.5%)
-        margin = position_size / self.leverage  # Маржа для позиции
-        
+        entry_price = self.current_price
+        leverage = self.leverage
+        margin = self.futures_balance
+        maintenance_margin_rate = 0.005  # 0.5% для фьючерсов (может варьироваться)
+        maintenance_margin = position_size * entry_price * maintenance_margin_rate
+
         if direction == "long":
-            liquidation_price = self.current_price - (margin / (position_size * (1 - maintenance_margin_rate)))
+            # Формула для лонга
+            liquidation_price = entry_price - (margin - maintenance_margin) / (position_size * leverage)
         elif direction == "short":
-            liquidation_price = self.current_price + (margin / (position_size * (1 - maintenance_margin_rate)))
+            # Формула для шорта
+            liquidation_price = entry_price + (margin - maintenance_margin) / (position_size * leverage)
         else:
-            raise ValueError("Invalid direction for position. Must be 'long' or 'short'.")
-        
-        return round(liquidation_price, 4)  # Округляем до 4 знаков
+            raise ValueError("Invalid direction: must be 'long' or 'short'")
+
+        return round(liquidation_price, 5)  # Округляем до 5 знаков
 
     def _calculate_reward(self, position):
         """
@@ -350,6 +472,7 @@ class TradingEnvironment:
         """
         pnl = self._calculate_pnl(position)
         reward = pnl - abs(pnl) * 0.001  # Учет комиссии
+        logging.debug(f"Calculating reward: PnL = {pnl}, Reward before commission: {reward}")
         
         if pnl > 0:
             return reward * 1.5  # Награда за прибыль
@@ -361,60 +484,63 @@ class TradingEnvironment:
         Расчет PnL по позиции.
         """
         if position["direction"] == "long":
-            # logging.info(f"PnL Position Long: {(self.current_price - position['entry_price']) * position['position_size']}")
-            # logging.info(f"PnL Position Long: {self.current_price} {position['entry_price']}")
-            return (self.current_price - position["entry_price"]) * position["position_size"]
+            return (self.current_price - position["entry_price"]) * abs(position["position_size"])
         elif position["direction"] == "short":
-            # logging.info(f"PnL Position Short: {(position['entry_price'] - self.current_price) * abs(position['position_size'])}")
-            # logging.info(f"PnL Position Short: {self.current_price} {position['entry_price']}")
             return (position["entry_price"] - self.current_price) * abs(position["position_size"])
         return 0
 
     def _check_liquidation(self):
         """
         Проверяет ликвидацию всех открытых позиций.
+        Возвращает True, если произошла ликвидация, иначе False.
         """
+        liquidation_triggered = False  # Флаг ликвидации
+        total_pnl = 0  # Общий PnL от закрытых позиций
+        remaining_positions = []  # Оставшиеся после ликвидации позиции
+
         for position in self.positions:
             if position["direction"] == "long" and self.current_price <= position["liquidation_price"]:
                 logging.warning(f"Liquidation triggered for Long position at {self.current_price}")
                 loss = position["position_size"] / self.leverage
                 self.futures_balance -= loss
-                self.spot_balance += max(0, self.futures_balance)  # Остаток переводим в spot
-                self.futures_balance = max(0, self.futures_balance)
-                self.positions = []  # Закрываем все позиции
+                total_pnl += self._calculate_pnl(position)  # Учитываем PnL от ликвидируемой позиции
+                liquidation_triggered = True
+
             elif position["direction"] == "short" and self.current_price >= position["liquidation_price"]:
                 logging.warning(f"Liquidation triggered for Short position at {self.current_price}")
                 loss = position["position_size"] / self.leverage
                 self.futures_balance -= loss
-                self.spot_balance += max(0, self.futures_balance)
-                self.futures_balance = max(0, self.futures_balance)
-                self.positions = []
+                total_pnl += self._calculate_pnl(position)  # Учитываем PnL от ликвидируемой позиции
+                liquidation_triggered = True
 
-    # def _check_liquidation(self):
-    #     for position in self.positions:
-    #         current_price = self.current_price
-    #         current_price = float(current_price) if isinstance(current_price, (list, np.ndarray)) else current_price
+            else:
+                remaining_positions.append(position)  # Оставляем позиции, не затронутые ликвидацией
 
-    #         liquidation_price = position["liquidation_price"]
-    #         # liquidation_price = float(liquidation_price) if isinstance(liquidation_price, (np.ndarray, list)) else liquidation_price
-            
-    #         # print(f"current_price: {current_price}, type: {type(current_price)}")
-    #         # print(f"position['liquidation_price']: {position['liquidation_price']}, type: {type(position['liquidation_price'])}")
-    #         if position["direction"] == "long" and current_price <= liquidation_price:
-    #             self.futures_balance = 0
-    #             self.positions = []
-    #             logging.warning("Long position liquidated!")
-    #         elif position["direction"] == "short" and current_price >= liquidation_price:
-    #             self.futures_balance = 0
-    #             self.positions = []
-    #             logging.warning("Short position liquidated!")
+        # Обновляем оставшиеся позиции
+        self.positions = remaining_positions
+
+        # Если ликвидация произошла, обновляем балансы
+        if liquidation_triggered:
+            self.spot_balance += max(0, self.futures_balance)  # Переводим остаток в spot
+            self.futures_balance = max(0, self.futures_balance)
+            logging.info(f"Liquidation occurred. Total PnL: {total_pnl:.5f}, Remaining futures balance: {self.futures_balance:.2f}")
+            return True
+
+        return False
 
     def _log_state(self):
-        logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
-                     f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
-        if self.positions:
-            for i, position in enumerate(self.positions, start=1):
-                logging.info(f"Position {i}: {position}")
+        # Логируем состояние только каждые 100 шагов
+        if self.current_step % 100 == 0:
+            logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
+                        f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
+            if self.positions:
+                for i, position in enumerate(self.positions, start=1):
+                    logging.info(f"Position {i}: {position}")
+        # logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
+        #              f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
+        # if self.positions:
+        #     for i, position in enumerate(self.positions, start=1):
+        #         logging.info(f"Position {i}: {position}")
 
 class DQLAgent:
     def __init__(self, state_size, action_size, hidden_size=128, learning_rate=0.001, discount_factor=0.99, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
@@ -436,6 +562,9 @@ class DQLAgent:
 
         # Инициализация PnL
         self.pnl = 0
+
+        # **Инициализация trade_log**
+        self.trade_log = []  # Добавляем атрибут для хранения журнала сделок
 
         # Модель
         self.q_network = self._build_model().to("cuda")
@@ -513,24 +642,16 @@ class DQLAgent:
         batch = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        # Преобразуем в тензоры
-        # print(f"Size of states: {len(states)}, Shape of each state: {[s.shape if isinstance(s, np.ndarray) else len(s) for s in states]}")
-        # states = torch.tensor(states, dtype=torch.float32)
-        # states = torch.stack([torch.tensor(state, dtype=torch.float32).to("cuda") for state in states])
         states = torch.stack([
             torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
             for state in states
         ])
 
-        # print(f"Tensor shape after conversion: {states.shape}")
-        # print(f"Size of states: {len(actions)}, Shape of each state: {[s.shape if isinstance(s, np.ndarray) else len(s) for s in actions]}")
         # Преобразуем `actions` в тензор индексов
         actions = [action[0] for action in actions]  # Извлекаем индексы действий
         actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to("cuda")
         # print(f"Tensor shape after conversion: {actions.shape}")
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to("cuda")
-        # next_states = torch.tensor(next_states, dtype=torch.float32)
-        # next_states = torch.stack([torch.tensor(state, dtype=torch.float32).to("cuda") for state in next_states])
         next_states = torch.stack([
             torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
             for state in next_states
@@ -559,33 +680,28 @@ class DQLAgent:
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
-    def apply_rewards_and_penalties(self, reward, position_pnl, positions):
-        """
-        Применяет систему наград и штрафов.
-        """
+    def apply_rewards_and_penalties(self, reward, position_pnl, current_step, trade_log):
         penalty = 0
         bonus = 0
 
         # Штраф за отрицательный PnL
         if position_pnl < 0:
-            penalty += abs(position_pnl) * 0.1  # 10% от отрицательного PnL
+            penalty += abs(position_pnl) * 0.2  # Увеличенный штраф
 
         # Вознаграждение за положительный PnL
         if position_pnl > 0:
-            bonus += position_pnl * 0.2  # 20% от положительного PnL
+            bonus += position_pnl * 0.5  # Увеличенный бонус
 
-        # Вознаграждение за удержание прибыльной позиции
-        if position_pnl > 0 and len(positions) > 0:
-            hold_bonus = 0.01 * len(positions)  # Пример: +0.01 за каждую удерживаемую прибыльную позицию
-            bonus += hold_bonus
+        # Бонус за достижение take profit
+        if any(log.get("pnl") is not None and log.get("pnl") > 0 for log in trade_log[-1:]):  # Последняя сделка с профитом
+            bonus += 2
 
-        # Награда за долгосрочную прибыль (без убытков за последние 10 шагов)
-        if self.pnl > 0 and self.current_step > 10:
-            recent_pnl = [log['pnl'] for log in self.trade_log[-10:] if 'pnl' in log]
-            if all(pnl >= 0 for pnl in recent_pnl):
-                bonus += 1  # Дополнительный бонус
+        # Штраф за частые убытки
+        if current_step > 10:
+            recent_losses = [log['pnl'] for log in trade_log[-10:] if 'pnl' in log and log['pnl'] < 0]
+            if len(recent_losses) > 5:  # Более 50% убытков
+                penalty += 1
 
-        # Итоговая награда с учетом штрафов и бонусов
         return reward - penalty + bonus
 
 def initialize_binance_client():
@@ -597,135 +713,6 @@ def initialize_binance_client():
     API_SECRET = acc_config["API_SECRET"]
 
     return Client(API_KEY, API_SECRET)
-
-def train_model(model, train_loader, criterion_direction, criterion_confidence, optimizer, num_epochs=10):
-    model.train()
-
-    for epoch in range(num_epochs):
-        total_loss = 0
-        print(f"\nEpoch [{epoch + 1}/{num_epochs}]")
-        # for inputs, targets in train_loader:
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
-            # print(f"Inputs shape: {inputs.shape}, Targets shape: {targets.shape}")
-            inputs, targets = inputs.to("cuda"), targets.to("cuda")
-
-            # # Прогнозы модели
-            direction_pred, confidence_pred = model(inputs)
-
-            # Приведение к правильным формам
-            direction_pred = direction_pred[:, -1, :]  # Последний временной шаг для классификации
-            confidence_pred = confidence_pred[:, -1, :]  # Последний временной шаг для регрессии
-
-            direction_target = targets[:, 0].long()  # Индексы классов (0: long, 1: short, 2: hold)
-            confidence_target = targets[:, 1].unsqueeze(1)  # Уверенность как регрессия
-            logging.info(f"Model created with input_size: \n{direction_target} \n{confidence_target}")
-
-            # Расчет потерь
-            loss_direction = criterion_direction(direction_pred, direction_target)
-            loss_confidence = criterion_confidence(confidence_pred, confidence_target)
-            loss = loss_direction + loss_confidence
-
-            # np.set_printoptions(suppress=True, precision=10)
-            # # Логи промежуточных значений
-            # print(f"\nBatch {batch_idx + 1}")
-            # print(f"Direction Predictions:\n{direction_pred.softmax(dim=1).detach().cpu().numpy()}")
-            # # Логирование предсказаний направления
-            # # predicted_classes = torch.argmax(direction_pred, dim=1)
-            # # for i, (probs, pred_class, true_class) in enumerate(zip(direction_pred.tolist(), predicted_classes.tolist(), targets[:, 0].tolist())):
-            # #     print(f"Sample {i + 1}: Probabilities: {probs}, Predicted Class: {pred_class}, True Class: {int(true_class)}")
-            # print(f"Direction Targets:\n{direction_target.detach().cpu().numpy()}")
-            # print(f"Confidence Predictions:\n{confidence_pred.detach().cpu().numpy()}")
-            # print(f"Confidence Targets:\n{confidence_target.detach().cpu().numpy()}")
-            # print(f"Loss (Direction): {loss_direction.item():.14f}")
-            # print(f"Loss (Confidence): {loss_confidence.item():.14f}")
-            # print(f"Total Loss: {loss.item():.14f}")
-            # np.set_printoptions(suppress=False)
-
-            optimizer.zero_grad()
-            # Обновление градиентов
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss:.14f}")
-
-def evaluate_model(model, test_loader, criterion_direction, criterion_confidence):
-    """
-    Оценка модели на тестовых данных.
-    """
-    model.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for X_batch, y_batch in test_loader:
-            X_batch, y_batch = X_batch.to("cuda"), y_batch.to("cuda")
-
-            try:
-                # Прогнозы модели
-                direction_pred, confidence_pred = model(X_batch)
-
-                direction_pred = direction_pred[:, -1, :]  # Последний временной шаг для классификации
-                confidence_pred = confidence_pred[:, -1, :]  # Последний временной шаг для регрессии
-
-                # Разделение таргетов
-                direction_target = y_batch[:, 0].long()  # Индексы классов
-                confidence_target = y_batch[:, 1].unsqueeze(1)  # Уверенность
-                
-                # Расчет потерь
-                loss_direction = criterion_direction(direction_pred, direction_target)
-                loss_confidence = criterion_confidence(confidence_pred, confidence_target)
-                loss = loss_direction + loss_confidence
-
-                total_loss += loss.item()
-
-                # Логгирование форм данных
-                # print(f"direction_pred.shape: {direction_pred.shape}, direction_target.shape: {direction_target.shape}")
-                # print(f"confidence_pred.shape: {confidence_pred.shape}, confidence_target.shape: {confidence_target.shape}")
-            except Exception as e:
-                logging.error(f"Ошибка в evaluate_model: {e}")
-                continue
-
-    if len(test_loader) > 0:
-        average_loss = total_loss / len(test_loader)
-    else:
-        logging.warning("test_loader пустой")
-        average_loss = float('inf')
-
-    print(f"Test Loss: {average_loss:.14f}")
-    return average_loss
-
-class TradingModel(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super(TradingModel, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3_direction = nn.Linear(hidden_size, 3)  # 3 класса: long, short, hold
-        self.fc3_confidence = nn.Linear(hidden_size, 1)  # Уверенность
-
-        self.relu = nn.ReLU()
-        self.softmax = nn.Softmax(dim=1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-
-        direction = self.softmax(self.fc3_direction(x))  # Выход для направления
-        confidence = self.sigmoid(self.fc3_confidence(x))  # Выход для уверенности
-
-        return direction, confidence
-
-class TradingDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        # self.y = torch.tensor(y, dtype=torch.float32)
-        self.y = y.clone().detach().to(torch.float32)
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
 
 # Модель GRU для данных стакана
 class OrderBookGRUModel(nn.Module):
@@ -756,9 +743,10 @@ def fetch_orderbook_data() -> pd.DataFrame:
     logging.info(f"Fetching data for orderbook")
     # query = f"SELECT * FROM order_book_data order by id LIMIT 380000"
     # query = f"SELECT * FROM order_book_data order by id LIMIT 10000"
-    # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 35000"
-    query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 70000"
+    # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 45000"
+    # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 70000"
     # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 25000"
+    query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 6000"
     # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 1000"
     # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id"
     data = execute_query(query)
@@ -1184,57 +1172,6 @@ def adjust_interval_timestamp(interval: str, timestamp: datetime) -> datetime:
         return timestamp.replace(second=0, microsecond=0)
     return timestamp
 
-def prepare_data_for_orderbook(orderbook_data: pd.DataFrame, sequence_length: int) -> tuple:
-    """
-    Подготавливает данные для обучения модели, объединяя данные стакана и интервалов.
-    :param orderbook_data: Данные стакана.
-    :param intervals_predictions: Прогнозы моделей интервалов.
-    :param sequence_length: Длина последовательности для стакана.
-    :return: Кортеж (X, y) для обучения.
-    """
-    X = []
-    orderbook_data["timestamp"] = pd.to_datetime(orderbook_data["timestamp"])
-
-    first_open_time = orderbook_data.iloc[0]["timestamp"]  # Первый элемент
-    last_open_time = orderbook_data.iloc[-1]["timestamp"]  # Последний элемент
-
-    intervals_predictions = get_intervals_predictions(first_open_time, last_open_time)
-
-    for i in range(len(orderbook_data) - sequence_length):
-        # Извлечение последовательности стакана
-        orderbook_sequence = orderbook_data.iloc[i:i + sequence_length].drop(columns=["id", "timestamp"]).values.astype(np.float32)
-        # Последняя временная метка текущей последовательности стакана
-        last_timestamp = orderbook_data.iloc[i + sequence_length - 1]["timestamp"]
-        # Фильтруем прогнозы по интервалам, даты которых <= last_timestamp
-        filtered_predictions = intervals_predictions[intervals_predictions["timestamp"] <= last_timestamp]
-        # Если нужны только последние прогнозы по каждому интервалу
-        latest_predictions = filtered_predictions.groupby("interval").tail(1)
-        # Объединяем данные `prediction` и `trend` для каждого интервала
-        combined_features = []
-        for _, row in latest_predictions.iterrows():
-            combined_row = np.concatenate([row["prediction"],
-            [row["trend_price_difference"], row["trend_sma"], row["trend_strength"],
-            # row["timestamp"], row['hour'], row['minute'], row['weekday'],
-            row["open_price_normalized"], row["high_price_normalized"], row["low_price_normalized"], row["close_price_normalized"],
-            row["volume_normalized"],
-            row["rsi_normalized"], row["macd_normalized"], row["macd_signal_normalized"], row["macd_hist_normalized"],
-            row["sma_20_normalized"], row["ema_20_normalized"],
-            row["upper_bb_normalized"], row["middle_bb_normalized"], row["lower_bb_normalized"], row["obv_normalized"]]])
-            combined_features.append(combined_row)
-        # Преобразуем список в двумерный массив
-        combined_features = np.array(combined_features).flatten()
-        # Повторяем объединенные данные по количеству строк в `orderbook_sequence`
-        repeated_predictions = np.tile(combined_features, (orderbook_sequence.shape[0], 1))
-        try:
-            # Объединяем массивы
-            combined_data = np.hstack((orderbook_sequence, repeated_predictions))
-        except ValueError as e:
-            print(f"Ошибка при hstack: {e}")
-        # print(f"combined_data: {combined_data.shape}")
-        X.append(combined_data)
-
-    return np.array(X)
-
 def prepare_data_for_orderbook_non_overlapping(orderbook_data: pd.DataFrame) -> np.ndarray:
     """
     Подготавливает данные для обучения модели, исключая перекрывающиеся строки.
@@ -1242,6 +1179,8 @@ def prepare_data_for_orderbook_non_overlapping(orderbook_data: pd.DataFrame) -> 
     :return: Массив X для обучения.
     """
     X = []
+    # Устанавливаем опции печати для numpy
+    # np.set_printoptions(formatter={'float_kind': lambda x: f"{x:.14f}"})
     orderbook_data["timestamp"] = pd.to_datetime(orderbook_data["timestamp"])
 
     # Извлекаем временные рамки
@@ -1268,6 +1207,8 @@ def prepare_data_for_orderbook_non_overlapping(orderbook_data: pd.DataFrame) -> 
         # Объединяем данные `prediction` и индикаторы
         combined_features = []
         for _, row in latest_predictions.iterrows():
+            # print(f"{row['prediction']}")
+            # print(f"{row['trend_price_difference']} {row['trend_sma']} {row['trend_strength']}")
             combined_row = np.concatenate([row["prediction"],
                 [row["trend_price_difference"], row["trend_sma"], row["trend_strength"],
                 row["open_price_normalized"], row["high_price_normalized"], row["low_price_normalized"], row["close_price_normalized"],
@@ -1280,6 +1221,9 @@ def prepare_data_for_orderbook_non_overlapping(orderbook_data: pd.DataFrame) -> 
         # Преобразуем список в двумерный массив и объединяем с текущей строкой стакана
         combined_features = np.array(combined_features).flatten()
         combined_data = np.hstack((orderbook_row, combined_features))
+        # print("\n")
+        # print(combined_data)
+        # print("\n")
 
         # Добавляем результат в X
         X.append(combined_data)
@@ -1496,13 +1440,68 @@ def objective(trial):
     
     # orderbook_data = fetch_orderbook_data()
     orderbook_data = fetch_cached_data()
-    logging.info(f"Orderbook data fetched: {len(orderbook_data)} rows")
+    # logging.info(f"Orderbook data fetched: {len(orderbook_data)} rows")
 
-    # # TODO fetching data from db is too busy work
-    # # TODO it should be done one time for all trials to economy time of optimization process
-    # X = prepare_data_for_orderbook(orderbook_data, sequence_length)
+    # # # TODO fetching data from db is too busy work
+    # # # TODO it should be done one time for all trials to economy time of optimization process
+    # # X = prepare_data_for_orderbook(orderbook_data, sequence_length)
+    # TODO Cup data
+	# 		"mid_price" "sum_bid_volume" "sum_ask_volume" "bid_ask_imbalance"
+    # TODO Interval 1d data
+	# 		"open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# 		"trend_price_difference" "trend_sma" "trend_strength"
+	# 		"open_price_normalized" "high_price_normalized" "low_price_normalized" "close_price_normalized"
+	# 		"volume_normalized" "rsi_normalized"
+	# 		"macd_normalized" "macd_signal_normalized" "macd_hist_normalized" "sma_20_normalized" "ema_20_normalized"
+	# 		"upper_bb_normalized" "middle_bb_normalized" "lower_bb_normalized" "obv_normalized"
+    # TODO Interval 4h data
+	# 		"open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# 		"trend_price_difference" "trend_sma" "trend_strength"
+	# 		"open_price_normalized" "high_price_normalized" "low_price_normalized" "close_price_normalized"
+	# 		"volume_normalized" "rsi_normalized"
+	# 		"macd_normalized" "macd_signal_normalized" "macd_hist_normalized" "sma_20_normalized" "ema_20_normalized"
+	# 		"upper_bb_normalized" "middle_bb_normalized" "lower_bb_normalized" "obv_normalized"
+    # TODO Interval 1h data
+	# 		"open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# 		"trend_price_difference" "trend_sma" "trend_strength"
+	# 		"open_price_normalized" "high_price_normalized" "low_price_normalized" "close_price_normalized"
+	# 		"volume_normalized" "rsi_normalized"
+	# 		"macd_normalized" "macd_signal_normalized" "macd_hist_normalized" "sma_20_normalized" "ema_20_normalized"
+	# 		"upper_bb_normalized" "middle_bb_normalized" "lower_bb_normalized" "obv_normalized"
+    # TODO Interval 15m data
+	# 		"open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# 		"trend_price_difference" "trend_sma" "trend_strength"
+	# 		"open_price_normalized" "high_price_normalized" "low_price_normalized" "close_price_normalized"
+	# 		"volume_normalized" "rsi_normalized"
+	# 		"macd_normalized" "macd_signal_normalized" "macd_hist_normalized" "sma_20_normalized" "ema_20_normalized"
+	# 		"upper_bb_normalized" "middle_bb_normalized" "lower_bb_normalized" "obv_normalized"
+    # TODO Interval 5m data
+	# 		"open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# 		"trend_price_difference" "trend_sma" "trend_strength"
+	# 		"open_price_normalized" "high_price_normalized" "low_price_normalized" "close_price_normalized"
+	# 		"volume_normalized" "rsi_normalized"
+	# 		"macd_normalized" "macd_signal_normalized" "macd_hist_normalized" "sma_20_normalized" "ema_20_normalized"
+	# 		"upper_bb_normalized" "middle_bb_normalized" "lower_bb_normalized" "obv_normalized"
+    # TODO Interval 1m data
+	# 		"open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# 		"trend_price_difference" "trend_sma" "trend_strength"
+	# 		"open_price_normalized" "high_price_normalized" "low_price_normalized" "close_price_normalized"
+	# 		"volume_normalized" "rsi_normalized"
+	# 		"macd_normalized" "macd_signal_normalized" "macd_hist_normalized" "sma_20_normalized" "ema_20_normalized"
+	# 		"upper_bb_normalized" "middle_bb_normalized" "lower_bb_normalized" "obv_normalized"
+
+    # TODO  "open_price_normalized" "close_price_normalized" "low_price_normalized" "high_price_normalized"
+	# TODO  "trend_price_difference" "trend_sma" "trend_strength"
+    # TODO  Interval 5m data 92	93	94	95	96	97	98
+    # TODO  Interval 1m data 114	115	116	117	118	119	120
     X = prepare_data_for_orderbook_non_overlapping(orderbook_data)
-    logging.info(f"Prepared data shape: {X.shape}")
+    # print("\n")
+    # print(f"{X[0][92]} {X[0][93]} {X[0][94]} {X[0][95]}")
+    # print(f"{X[0][96]} {X[0][97]} {X[0][98]}")
+    # print("\n")
+    # print(f"{X[0][114]} {X[0][115]} {X[0][116]} {X[0][117]}")
+    # print(f"{X[0][118]} {X[0][119]} {X[0][120]}")
+    # logging.info(f"Prepared data shape: {X.shape}")
     # print(f"Shape of X: {np.array(X).shape}")
     # print(f"Sample from X[0]: {X[0]}")
     # print(f"Sample from X[0]: {X[1]}")
@@ -1510,7 +1509,7 @@ def objective(trial):
     # print(f"Sample from X[0]: {X[3]}")
     # print(f"Sample from X[0]: {X[3].shape}")
 
-    agent = DQLAgent(state_size=140, action_size=6)  # Пример с Deep Q-Learning
+    agent = DQLAgent(state_size=141, action_size=6)  # Пример с Deep Q-Learning
     env = TradingEnvironment(X)
 
     episodes = 1000
@@ -1540,7 +1539,7 @@ def objective(trial):
             # Применяем систему штрафов и наград (если требуется)
             penalty = abs(reward) * 0.01 if reward < 0 else 0  # Штраф за отрицательную награду
             # Вызов с передачей позиций
-            adjusted_reward = agent.apply_rewards_and_penalties(reward, penalty, env.positions)
+            adjusted_reward = agent.apply_rewards_and_penalties(reward, penalty, env.current_step, env.trade_log)
 
             # Сохраняем опыт в памяти агента
             agent.store_experience(state, action, adjusted_reward, next_state, done)
@@ -1554,6 +1553,9 @@ def objective(trial):
 
             if done:
                 print(f"Episode {episode + 1}: Total Reward = {total_reward}")
+                trade_report = env.generate_trade_report()
+                # print(trade_report)
+                logging.info(f"Trade report: \n{trade_report}")
                 logging.info(f"Episode {episode + 1}: Total Reward = {total_reward}")
                 break
 
@@ -1562,6 +1564,98 @@ def objective(trial):
             agent.update_target_network()
             print(f"Target network updated at episode {episode + 1}")
             logging.info(f"Target network updated at episode {episode + 1}")
+
+    # # TEST 1
+    # # Создадим тестовую позицию
+    # test_position = {
+    #     "direction": "long",  # Длинная позиция
+    #     "entry_price": 0.798157,  # Цена входа
+    #     "position_size": 1000.0,  # Размер позиции
+    # }
+
+    # # Установим текущую цену
+    # current_price = 0.798045
+
+    # # Рассчитаем PnL
+    # def test_calculate_pnl(position, current_price):
+    #     if position["direction"] == "long":
+    #         return (current_price - position["entry_price"]) * position["position_size"]
+    #     elif position["direction"] == "short":
+    #         return (position["entry_price"] - current_price) * position["position_size"]
+    #     return 0
+
+    # print(denormalize(test_position["entry_price"]))
+    # print(denormalize(current_price))
+    # # Вычисляем PnL
+    # pnl = test_calculate_pnl(test_position, current_price)
+    # print(f"Рассчитанный PnL: {pnl:.10f}")
+    # print("____________________________________________________")
+
+    # # TEST 2
+    # # Тестовые данные для среды
+    # test_env = {
+    #     "positions": [
+    #         {"position_id": 1, "entry_price": 0.798157, "position_size": 1000.0, "direction": "long"},
+    #     ],
+    #     "futures_balance": 50.0,  # Начальный баланс
+    #     "current_price": 0.798045,  # Текущая цена
+    # }
+
+    # # Функция закрытия позиций
+    # def test_close_positions(env):
+    #     total_pnl = 0
+    #     remaining_positions = []
+
+    #     for position in env["positions"]:
+    #         pnl = test_calculate_pnl(position, env["current_price"])
+    #         total_pnl += pnl
+    #         print(f"Закрытие позиции ID {position['position_id']}: PnL = {pnl:.10f}")
+        
+    #     env["futures_balance"] += total_pnl  # Обновляем баланс
+    #     env["positions"] = remaining_positions  # Все позиции закрыты
+    #     return total_pnl, env["futures_balance"]
+
+    # # Тестируем функцию
+    # pnl, updated_balance = test_close_positions(test_env)
+    # print(f"Итоговый PnL: {pnl:.10f}")
+    # print(f"Обновленный баланс фьючерсов: {updated_balance:.10f}")
+    # print("____________________________________________________")
+
+    # # TEST 3
+    # # Тестовые данные журнала сделок
+    # trade_log = [
+    #     {
+    #         "action": "close",
+    #         "step": 596,
+    #         "position_id": 2,
+    #         "entry_price": 0.798157,
+    #         "exit_price": 0.798045,
+    #         "pnl": -0.004750877,
+    #         "exit_spot_balance": 40.00548,
+    #         "exit_futures_balance": 61.964428,
+    #     },
+    # ]
+
+    # # Генерация отчета
+    # def test_generate_trade_report(trade_log):
+    #     report_data = [
+    #         {
+    #             "Сделка №": log["position_id"],
+    #             "Вход (шаг)": log["step"] - 1,
+    #             "Выход (шаг)": log["step"],
+    #             "Цена входа": log["entry_price"],
+    #             "Цена выхода": log["exit_price"],
+    #             "Прибыль/Убыток": log["pnl"],
+    #             "Конечный баланс (Spot)": log["exit_spot_balance"],
+    #             "Конечный баланс (Futures)": log["exit_futures_balance"],
+    #         }
+    #         for log in trade_log if log["action"] == "close"
+    #     ]
+    #     return pd.DataFrame(report_data)
+
+    # # Проверяем функцию
+    # report = test_generate_trade_report(trade_log)
+    # print(report)
 
     # orderbook_data = fetch_orderbook_data()
     # logging.info(f"Orderbook data fetched: {len(orderbook_data)} rows")

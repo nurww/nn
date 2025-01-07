@@ -1,187 +1,711 @@
-# trading_model.py
+from decimal import Decimal
 
-import sys
-import os
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, Dataset
-from sklearn.model_selection import train_test_split
-import numpy as np
-import optuna
-import pandas as pd
-import json
-import logging
-from datetime import datetime
-import time
-import pandas as pd
-import mplfinance as mpf
-
-# Добавляем текущий путь к проекту в sys.path для корректного импорта
-amrita = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.append(amrita)
-
-from project_root.data.database_manager import execute_query
-
-# Функция для получения последних данных интервала
-def fetch_interval_data(interval: str, sequence_length: int, last_open_time: datetime) -> pd.DataFrame:
-    query = f"""
-        SELECT * FROM binance_klines
-        WHERE data_interval = '{interval}'
-        AND open_time <= '{last_open_time}'
-        ORDER BY open_time DESC
-        LIMIT {sequence_length}
+def denormalize(value):
     """
-    data = execute_query(query)
-    if not data.empty:
-        data = data.iloc[::-1]  # Реверсируем, чтобы данные были в хронологическом порядке
-    return data
+    Денормализует значение на основе диапазона.
+    """
+    min_value = 0
+    max_value = 115000
+    return value * (max_value - min_value) + min_value
 
-def calculate_filtered_targets(data, window_size, rrr_threshold=2, min_potential_pnl=0.01, max_hold_time=15):
-    """
-    Генерация таргетов с учетом фильтров RRR, потенциальной прибыли и времени удержания.
-    """
-    print(data)
-    
-    data = data.iloc[::-1].reset_index(drop=True)
-    targets = []
-    for i in range(len(data) - window_size):
-        entry_price = data['open_price'].iloc[i]
-        window_data = data.iloc[i + 1:i + 1 + window_size]
-        
-        # Long
-        max_price = window_data['high_price'].max()
-        min_price = window_data['low_price'].min()
-        # print(f"Max: {window_data['high_price'].max()}")
-        # print(f"Min: {window_data['low_price'].min()}")
-        potential_pnl_long = (max_price - entry_price) / entry_price
-        max_negative_long = (entry_price - min_price) / entry_price
-        rrr_long = potential_pnl_long / max_negative_long if max_negative_long > 0 else 0
-        
-        # Short
-        potential_pnl_short = (entry_price - min_price) / entry_price
-        max_negative_short = (max_price - entry_price) / entry_price
-        rrr_short = potential_pnl_short / max_negative_short if max_negative_short > 0 else 0
-        
-        # Выбираем лучшее направление
-        if potential_pnl_long > min_potential_pnl and rrr_long >= rrr_threshold:
-            direction = 0  # long
-            exit_price = max_price
-            potential_pnl = potential_pnl_long
-            max_negative_diff = max_negative_long
-            # hold_time = (window_data.index[window_data['high_price'].idxmax()] - data.index[i]).total_seconds() / 60
-        elif potential_pnl_short > min_potential_pnl and rrr_short >= rrr_threshold:
-            direction = 1  # short
-            exit_price = min_price
-            potential_pnl = potential_pnl_short
-            max_negative_diff = max_negative_short
-            # hold_time = (window_data.index[window_data['low_price'].idxmin()] - data.index[i]).total_seconds() / 60
+def test(size):
+    print(f"Size: {size}")
+    # TEST 1
+    test_position = {
+        "direction": "long",  # Длинная позиция
+        "entry_price": Decimal("0.798157"),  # Цена входа
+        "position_size": Decimal(size),  # Размер позиции
+    }
+
+    current_price = Decimal("0.798045")
+    print(denormalize(current_price))
+    print(denormalize(test_position["entry_price"]))
+
+    def test_calculate_pnl(position, current_price):
+        """
+        Рассчитывает PnL без учета дополнительных корректировок.
+        """
+        if position["direction"] == "long":
+            pnl = (current_price - position["entry_price"]) * position["position_size"]
+        elif position["direction"] == "short":
+            pnl = (position["entry_price"] - current_price) * position["position_size"]
         else:
-            print(f"{i} step, continue, no deal found")
-            continue  # Если ни одно направление не проходит фильтры, пропускаем
+            pnl = Decimal("0")
+        return pnl
+
+    # Рассчитаем и выведем PnL
+    pnl = test_calculate_pnl(test_position, current_price)
+    print(f"Рассчитанный PnL: {pnl:.10f}")
+
+    # Сравнение с ожидаемым значением
+    actual_pnl = {
+        100: -0.01,
+        1000: -0.12,
+        10000: -1.39,
+        100000: -14.02,
+        1000000: -140.31,
+        10000000: -1403.22,
+    }.get(size, None)
+
+    if actual_pnl is not None:
+        print(f"Actual PnL: {actual_pnl:.10f}")
+
+    print("____________________________________________________")
+
+# Тесты
+for size in [100, 1000, 10000, 100000, 1000000, 10000000]:
+    test(size)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal
+
+def denormalize(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = 0
+    max_value = 115000
+    return value * (max_value - min_value) + min_value
+
+def test(size):
+    print(f"Size: {size}")
+    # TEST 1
+    test_position = {
+        "direction": "long",  # Длинная позиция
+        "entry_price": Decimal("0.798157"),  # Цена входа
+        "position_size": Decimal(size),  # Размер позиции
+    }
+
+    current_price = Decimal("0.798045")
+
+    def test_calculate_pnl_with_adjustment(position, current_price, adjustment_threshold=10000, adjustment_factor=1.20):
+        """
+        Рассчитывает PnL с учетом корректировки для больших позиций.
+        """
+        # Рассчитаем PnL
+        if position["direction"] == "long":
+            pnl = (current_price - position["entry_price"]) * position["position_size"]
+        elif position["direction"] == "short":
+            pnl = (position["entry_price"] - current_price) * position["position_size"]
+        else:
+            pnl = Decimal("0")
         
-        # Пропускаем сделки с длительностью больше max_hold_time
-        # if hold_time > max_hold_time:
-        #     print(f"{i} step, time limit")
-        #     continue
+        # Если размер позиции превышает порог, добавляем поправочный коэффициент
+        if position["position_size"] > adjustment_threshold:
+            pnl *= Decimal(adjustment_factor)
         
-        # Добавляем данные в "target"
-        targets.append({
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'direction': direction,
-            'potential_pnl': potential_pnl,
-            'max_negative_diff': max_negative_diff,
-            # 'hold_time': hold_time
-        })
-    print(targets)
-    return pd.DataFrame(targets)
+        return pnl
 
-# Запуск программы
-if __name__ == "__main__":
-    interval = '1m'
-    interval_sequence = 150
-    last_open_time = "2024-11-26 00:00:00"
-    data = fetch_interval_data(interval, interval_sequence, last_open_time)
-    # data = data.iloc[::-1].reset_index(drop=True)
-    results = calculate_filtered_targets(data, 15)
+    # Рассчитаем и выведем PnL
+    pnl = test_calculate_pnl_with_adjustment(test_position, current_price)
+    print(f"Рассчитанный PnL: {pnl:.10f}")
 
-    # Преобразуем столбец open_time в datetime
-    data['open_time'] = pd.to_datetime(data['open_time'], format='%d.%m.%Y %H:%M')
+    # Сравнение с ожидаемым значением
+    actual_pnl = {
+        100: -0.01,
+        1000: -0.12,
+        10000: -1.39,
+        100000: -14.02,
+        1000000: -140.31,
+        10000000: -1403.22,
+    }.get(size, None)
 
-    # Установим индекс в формате datetime для работы с mplfinance
-    data.set_index('open_time', inplace=True)
+    if actual_pnl is not None:
+        print(f"Actual PnL: {actual_pnl:.2f}")
 
-    # Переименуем столбцы в формат, который использует mplfinance
-    data.rename(columns={
-        'open_price': 'Open',
-        'high_price': 'High',
-        'low_price': 'Low',
-        'close_price': 'Close'
-    }, inplace=True)
+    print("____________________________________________________")
 
-    # # Построим график свечей
-    # mpf.plot(data, type='candle', style='charles', title='Candlestick Chart', ylabel='Price', volume=False)
+# Тесты
+for size in [100, 1000, 10000, 100000, 1000000, 10000000]:
+    test(size)
 
-    # Преобразуем результаты в DataFrame
-    results_df = pd.DataFrame(results)
 
-    # Добавим точки сделок на график
-    entry_markers = []
-    exit_markers = []
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
 
-    # Привязка сделок к временным меткам
-    for idx, trade in results_df.iterrows():
-        if trade['direction'] == 0:  # Long
-            # Найдем временную метку для entry_price
-            entry_time = data.index[(data['Open'] <= trade['entry_price']) & (data['High'] >= trade['entry_price'])]
-            exit_time = data.index[(data['Low'] <= trade['exit_price']) & (data['High'] >= trade['exit_price'])]
 
-            # Добавляем точки на график только если временные метки найдены
-            if not entry_time.empty and not exit_time.empty:
-                entry_markers.append(
-                    mpf.make_addplot(
-                        [trade['entry_price'] if idx == entry_time[0] else np.nan for idx in data.index],
-                        type='scatter',
-                        marker='^',
-                        markersize=70,
-                        color='green'
-                    )
-                )
-                exit_markers.append(
-                    mpf.make_addplot(
-                        [trade['exit_price'] if idx == exit_time[0] else np.nan for idx in data.index],
-                        type='scatter',
-                        marker='v',
-                        markersize=70,
-                        color='lime'
-                    )
-                )
-        elif trade['direction'] == 1:  # Short
-            entry_time = data.index[(data['Open'] >= trade['entry_price']) & (data['Low'] <= trade['entry_price'])]
-            exit_time = data.index[(data['Low'] <= trade['exit_price']) & (data['High'] >= trade['exit_price'])]
+from decimal import Decimal
 
-            if not entry_time.empty and not exit_time.empty:
-                entry_markers.append(
-                    mpf.make_addplot(
-                        [trade['entry_price'] if idx == entry_time[0] else np.nan for idx in data.index],
-                        type='scatter',
-                        marker='v',
-                        markersize=70,
-                        color='red'
-                    )
-                )
-                exit_markers.append(
-                    mpf.make_addplot(
-                        [trade['exit_price'] if idx == exit_time[0] else np.nan for idx in data.index],
-                        type='scatter',
-                        marker='^',
-                        markersize=70,
-                        color='pink'
-                    )
-                )
+def calculate_initial_margin(quantity, entry_price, leverage):
+    """
+    Рассчитывает начальную маржу для USDⓈ-Margined Contracts.
+    Initial Margin = Quantity * Entry Price * IMR
+    IMR = 1 / leverage
+    """
+    imr = Decimal("1") / Decimal(leverage)
+    return quantity * entry_price * imr
 
-    # Построим график со сделками
-    mpf.plot(data, type='candle', style='charles', title='Candlestick Chart with Trades',
-            ylabel='Price', addplot=entry_markers + exit_markers)
+def calculate_pnl(quantity, entry_price, exit_price, position_side):
+    """
+    Рассчитывает PnL (Profit and Loss) для USDⓈ-Margined Contracts.
+    Long position: PnL = (Exit Price - Entry Price) * Quantity
+    Short position: PnL = (Entry Price - Exit Price) * Quantity
+    """
+    print(f"Quantity: {quantity} {entry_price} {exit_price}")
+    if position_side == "long":
+        return (exit_price - entry_price) * quantity
+    elif position_side == "short":
+        return (entry_price - exit_price) * quantity
+    else:
+        raise ValueError("Invalid position_side. Use 'long' or 'short'.")
+
+def calculate_roi(pnl, initial_margin):
+    """
+    Рассчитывает ROI (Return on Investment).
+    ROI% = PnL / Initial Margin
+    """
+    return pnl / initial_margin * 100
+
+# Пример теста
+def test_futures_calculations(size):
+    # Параметры сделки
+    quantity = Decimal(size)  # Размер позиции
+    entry_price = Decimal("91788.055000")  # Цена входа
+    exit_price = Decimal("91775.175000")  # Цена выхода
+    leverage = Decimal("50")  # Плечо
+    position_side = "long"  # Длинная позиция ("long" или "short")
+
+    # Расчеты
+    initial_margin = calculate_initial_margin(quantity, entry_price, leverage)
+    pnl = calculate_pnl(quantity, entry_price, exit_price, position_side)
+    roi = calculate_roi(pnl, initial_margin)
+
+    # Вывод результатов
+    print(f"Initial Margin: {initial_margin:.10f} USDT")
+    print(f"PnL: {pnl:.10f} USDT")
+    print(f"ROI: {roi:.2f}%")
+
+# Тестируем
+test_futures_calculations(10)
+print("____________________________________________________")
+test_futures_calculations(100)
+print("____________________________________________________")
+test_futures_calculations(1000)
+print("____________________________________________________")
+test_futures_calculations(10000)
+print("____________________________________________________")
+test_futures_calculations(100000)
+print("____________________________________________________")
+test_futures_calculations(1000000)
+print("____________________________________________________")
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal
+
+def denormalize(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = 0
+    max_value = 115000
+    return value * (max_value - min_value) + min_value
+
+def test(size):
+    print(f"Size: {size}")
+    # TEST 1
+    test_position = {
+        "direction": "long",  # Длинная позиция
+        "entry_price": Decimal("0.798157"),  # Цена входа
+        "position_size": Decimal(size),  # Размер позиции
+    }
+
+    current_price = Decimal("0.798045")
+    print(denormalize(current_price))
+    print(denormalize(test_position["entry_price"]))
+
+    def test_calculate_pnl(position, current_price):
+        """
+        Рассчитывает PnL с учетом комиссии.
+        """
+        # Параметры комиссии
+        maker_fee_rate = Decimal("0.0002")  # Maker Fee (0.02%)
+        taker_fee_rate = Decimal("0.0005")  # Taker Fee (0.05%)
+        com = Decimal("0.1")
+
+        # Рассчитываем комиссию (используем position_size напрямую)
+        commission = position["position_size"] * taker_fee_rate
+        print(f"commission: {commission} {position['position_size']}")
+
+        # Рассчитываем PnL
+        if position["direction"] == "long":
+            print(((current_price - position["entry_price"]) * position["position_size"]))
+            print(((current_price - position["entry_price"]) * position["position_size"]) * com)
+            pnl = (current_price - position["entry_price"]) * position["position_size"] - commission
+        elif position["direction"] == "short":
+            pnl = (position["entry_price"] - current_price) * position["position_size"] - commission
+        else:
+            pnl = Decimal("0")
+        return pnl
+
+    # Рассчитаем и выведем PnL
+    pnl = test_calculate_pnl(test_position, current_price)
+    print(f"Рассчитанный PnL: {pnl:.10f}")
+
+    # Сравнение с ожидаемым значением
+    actual_pnl = {
+        100: -0.01,
+        1000: -0.12,
+        10000: -1.39,
+        100000: -14.02,
+        1000000: -140.31,
+        10000000: -1403.22,
+    }.get(size, None)
+
+    if actual_pnl is not None:
+        print(f"Actual PnL: {actual_pnl:.10f}")
+
+    print("____________________________________________________")
+
+# Тесты
+for size in [100, 1000, 10000, 100000, 1000000, 10000000]:
+    test(size)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal
+
+def denormalize(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = 0
+    max_value = 115000
+    return value * (max_value - min_value) + min_value
+
+def test(size):
+    print(f"Size: {size}")
+    # TEST 1
+    test_position = {
+        "direction": "long",  # Длинная позиция
+        "entry_price": Decimal("8000"),  # Цена входа
+        "position_size": Decimal(size),  # Размер позиции
+    }
+
+    current_price = Decimal("18000")
+    print(denormalize(current_price))
+    print(denormalize(test_position["entry_price"]))
+
+    def test_calculate_pnl(position, current_price):
+        """
+        Рассчитывает PnL с учетом комиссии.
+        """
+        # Параметры комиссии
+        maker_fee_rate = Decimal("0.0002")  # Maker Fee (0.02%)
+        taker_fee_rate = Decimal("0.0005")  # Taker Fee (0.05%)
+        com = Decimal("0.1")
+
+        # Рассчитываем комиссию (используем position_size напрямую)
+        commission = position["position_size"] * taker_fee_rate
+        print(f"commission: {commission} {position['position_size']}")
+
+        # Рассчитываем PnL
+        if position["direction"] == "long":
+            # print(((current_price - position["entry_price"]) * position["position_size"]))
+            # print(((current_price - position["entry_price"]) * position["position_size"]) * com)
+            print(f"{current_price} {position['entry_price']} {position['position_size']}")
+            pnl = (current_price - position["entry_price"]) * position["position_size"]
+            print(Decimal("1250") / (current_price - position["entry_price"]))
+        elif position["direction"] == "short":
+            pnl = (position["entry_price"] - current_price) * position["position_size"]
+        else:
+            pnl = Decimal("0")
+        return pnl
+    
+    # Рассчитаем и выведем PnL
+    pnl = test_calculate_pnl(test_position, current_price)
+    print(f"Рассчитанный PnL: {pnl:.10f}")
+
+    # Сравнение с ожидаемым значением
+    actual_pnl = {
+        100: -0.01,
+        1000: -0.12,
+        10000: -1.39,
+        100000: -14.02,
+        1000000: -140.31,
+        10000000: -1403.22,
+    }.get(size, None)
+
+    if actual_pnl is not None:
+        print(f"Actual PnL: {actual_pnl:.10f}")
+
+    print("____________________________________________________")
+
+# Тесты
+for size in [100, 1000, 10000, 100000, 1000000, 10000000]:
+    test(size)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal
+
+def calculate_pnl(entry_price, exit_price, quantity, leverage=20):
+    entry_price = Decimal(entry_price)
+    exit_price = Decimal(exit_price)
+    quantity = Decimal(quantity)
+    leverage = Decimal(leverage)
+
+    # Calculate Initial Margin
+    initial_margin = quantity / leverage
+
+    # Calculate PNL
+    pnl = quantity * (exit_price - entry_price) / entry_price
+
+    # Calculate ROI
+    roi = (pnl / initial_margin) * 100
+
+    return {
+        "Entry Price": entry_price,
+        "Exit Price": exit_price,
+        "Quantity": quantity,
+        "Initial Margin": round(initial_margin, 2),
+        "PNL": round(pnl, 2),
+        "ROI (%)": round(roi, 2)
+    }
+
+# Тестируем на ваших данных
+examples = [
+    {"entry_price": 8000, "exit_price": 8100, "quantity": 100},
+    {"entry_price": 18000, "exit_price": 18100, "quantity": 100},
+    {"entry_price": 28000, "exit_price": 28100, "quantity": 100},
+    {"entry_price": 38000, "exit_price": 38100, "quantity": 100},
+    {"entry_price": 48000, "exit_price": 48100, "quantity": 100},
+    {"entry_price": 58000, "exit_price": 58100, "quantity": 100},
+    {"entry_price": 68000, "exit_price": 68100, "quantity": 100},
+    {"entry_price": 78000, "exit_price": 78100, "quantity": 100},
+    {"entry_price": 80000, "exit_price": 80100, "quantity": 100},
+]
+
+for example in examples:
+    result = calculate_pnl(**example)
+    print(result)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal, getcontext
+
+# Настройка точности Decimal
+getcontext().prec = 10
+
+def calculate_pnl(entry_price, exit_price, quantity, leverage=20):
+    entry_price = Decimal(entry_price)
+    exit_price = Decimal(exit_price)
+    quantity = Decimal(quantity)
+    leverage = Decimal(leverage)
+
+    # Calculate Initial Margin
+    initial_margin = quantity / leverage
+
+    # Calculate PNL
+    pnl = quantity * (exit_price - entry_price) / entry_price
+
+    # Calculate ROI
+    roi = (pnl / initial_margin) * 100 if initial_margin > 0 else Decimal("0")
+
+    return {
+        "Entry Price": entry_price,
+        "Exit Price": exit_price,
+        "Quantity": quantity,
+        "Initial Margin": round(initial_margin, 2),
+        "PNL": round(pnl, 2),
+        "ROI (%)": round(roi, 2),
+    }
+
+# Примеры из ваших данных
+examples = [
+    {"entry_price": 8000, "exit_price": 8100, "quantity": 100},
+    {"entry_price": 18000, "exit_price": 18100, "quantity": 100},
+    {"entry_price": 28000, "exit_price": 28100, "quantity": 100},
+    {"entry_price": 38000, "exit_price": 38100, "quantity": 100},
+    {"entry_price": 48000, "exit_price": 48100, "quantity": 100},
+    {"entry_price": 58000, "exit_price": 58100, "quantity": 100},
+    {"entry_price": 68000, "exit_price": 68100, "quantity": 100},
+    {"entry_price": 78000, "exit_price": 78100, "quantity": 100},
+    {"entry_price": 80000, "exit_price": 80100, "quantity": 100},
+]
+
+# Расчет
+for example in examples:
+    result = calculate_pnl(**example)
+    print(result)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal, ROUND_DOWN
+
+def calculate_binance_metrics_corrected(entry_price, exit_price, quantity, leverage):
+    """
+    Рассчитывает Initial Margin, PNL и ROI с учетом верной интерпретации Quantity.
+    """
+    # Quantity интерпретируется как вложение с учетом плеча
+    initial_margin = (quantity / leverage).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    # PNL
+    pnl = ((exit_price - entry_price) * initial_margin * leverage / entry_price).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    # ROI
+    roi = (pnl / initial_margin * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    return {
+        "Entry price": f"{entry_price:.2f} USDT",
+        "Exit price": f"{exit_price:.2f} USDT",
+        "Quantity": f"{quantity:.2f} USDT",
+        "Initial margin": f"{initial_margin:.2f} USDT",
+        "PNL": f"{pnl:.2f} USDT",
+        "ROI": f"{roi:.2f} %"
+    }
+
+# Примеры из калькулятора
+examples = [
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('18000'), "exit_price": Decimal('18100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('28000'), "exit_price": Decimal('28100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('38000'), "exit_price": Decimal('38100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('48000'), "exit_price": Decimal('48100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('58000'), "exit_price": Decimal('58100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('68000'), "exit_price": Decimal('68100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('78000'), "exit_price": Decimal('78100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('80000'), "exit_price": Decimal('80100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+]
+
+# Расчёт
+results = [calculate_binance_metrics_corrected(**example) for example in examples]
+
+# Вывод
+for result in results:
+    print(result)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal, ROUND_DOWN
+
+def calculate_binance_metrics(entry_price, exit_price, quantity, leverage, position="long"):
+    """
+    Рассчитывает Initial Margin, PNL и ROI.
+    """
+    # Initial Margin
+    imr = Decimal('1') / leverage  # IMR = 1 / leverage
+    print(f"{imr} {quantity} {entry_price}")
+    print(f"{imr * (quantity * entry_price * imr)} {quantity} {entry_price}")
+    initial_margin = (quantity * entry_price * imr).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    quantity = Decimal("1.2")
+    # PNL
+    if position == "long":
+        pnl = ((exit_price - entry_price) * quantity).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+    elif position == "short":
+        pnl = ((entry_price - exit_price) * quantity).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+    else:
+        raise ValueError("Position must be 'long' or 'short'")
+
+    # ROI
+    roi = (pnl / initial_margin * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    return {
+        "Entry price": f"{entry_price:.2f} USDT",
+        "Exit price": f"{exit_price:.2f} USDT",
+        "Quantity": f"{quantity:.2f} USDT",
+        "Initial margin": f"{initial_margin:.2f} USDT",
+        "PNL": f"{pnl:.2f} USDT",
+        "ROI": f"{roi:.2f} %",
+        "Leverage": f"{leverage}"
+    }
+
+# Примеры из калькулятора
+examples = [
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('50')},
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('100')},
+    {"entry_price": Decimal('18000'), "exit_price": Decimal('18100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('28000'), "exit_price": Decimal('28100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('38000'), "exit_price": Decimal('38100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('78000'), "exit_price": Decimal('78100'), "quantity": Decimal('100'), "leverage": Decimal('30')},
+    {"entry_price": Decimal('80000'), "exit_price": Decimal('80100'), "quantity": Decimal('100'), "leverage": Decimal('80')},
+]
+
+# Расчёт
+results = [calculate_binance_metrics(**example) for example in examples]
+
+# Вывод
+for result in results:
+    print(result)
+
+
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+print("____________________________________________________")
+
+
+from decimal import Decimal, ROUND_DOWN
+
+def calculate_binance_metrics(entry_price, exit_price, quantity, leverage):
+    # Коэффициенты
+    k = Decimal('0.00012')  # Для Initial Margin
+    c = Decimal('0.00012')  # Для PnL
+
+    # Initial Margin
+    initial_margin = (k * quantity * entry_price / leverage).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    # PnL
+    pnl = (c * (exit_price - entry_price) * quantity).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    # ROI
+    roi = (pnl / initial_margin * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+    return {
+        "Entry price": f"{entry_price:.2f} USDT",
+        "Exit price": f"{exit_price:.2f} USDT",
+        "Quantity": f"{quantity:.2f} USDT",
+        "Initial margin": f"{initial_margin:.2f} USDT",
+        "PNL": f"{pnl:.2f} USDT",
+        "ROI": f"{roi:.2f} %",
+        "Leverage": f"{leverage}"
+    }
+
+# Примеры из калькулятора
+examples = [
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('50')},
+    {"entry_price": Decimal('8000'), "exit_price": Decimal('8100'), "quantity": Decimal('100'), "leverage": Decimal('100')},
+    {"entry_price": Decimal('18000'), "exit_price": Decimal('18100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('18000'), "exit_price": Decimal('18100'), "quantity": Decimal('100'), "leverage": Decimal('50')},
+    {"entry_price": Decimal('18000'), "exit_price": Decimal('18100'), "quantity": Decimal('100'), "leverage": Decimal('100')},
+    {"entry_price": Decimal('28000'), "exit_price": Decimal('28100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('28000'), "exit_price": Decimal('28100'), "quantity": Decimal('100'), "leverage": Decimal('50')},
+    {"entry_price": Decimal('28000'), "exit_price": Decimal('28100'), "quantity": Decimal('100'), "leverage": Decimal('100')},
+    {"entry_price": Decimal('38000'), "exit_price": Decimal('38100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('48000'), "exit_price": Decimal('48100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('58000'), "exit_price": Decimal('58100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('68000'), "exit_price": Decimal('68100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('78000'), "exit_price": Decimal('78100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('78000'), "exit_price": Decimal('78100'), "quantity": Decimal('100'), "leverage": Decimal('30')},
+    {"entry_price": Decimal('78000'), "exit_price": Decimal('78100'), "quantity": Decimal('100'), "leverage": Decimal('80')},
+    {"entry_price": Decimal('80000'), "exit_price": Decimal('80100'), "quantity": Decimal('100'), "leverage": Decimal('20')},
+    {"entry_price": Decimal('80000'), "exit_price": Decimal('80100'), "quantity": Decimal('100'), "leverage": Decimal('30')},
+    {"entry_price": Decimal('80000'), "exit_price": Decimal('80100'), "quantity": Decimal('100'), "leverage": Decimal('80')},
+]
+
+from decimal import Decimal
+
+# examples = [
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('100'), "leverage": Decimal('25')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('200'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('300'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('200'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('300'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('800'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('900'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('800'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('900'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('800'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('900'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('800'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('8000'), "exit_price": Decimal('8500'), "quantity": Decimal('900'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('100'), "leverage": Decimal('25')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('200'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('300'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('200'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('300'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('800'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('900'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('800'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('900'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('800'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('900'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('800'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('38000'), "exit_price": Decimal('38500'), "quantity": Decimal('900'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('100'), "leverage": Decimal('25')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('200'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('300'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('200'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('300'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('800'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('900'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('800'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('900'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('800'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('900'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('800'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('58000'), "exit_price": Decimal('58500'), "quantity": Decimal('900'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('100'), "leverage": Decimal('25')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('200'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('300'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('200'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('300'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('800'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('900'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('800'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('900'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('800'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('900'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('800'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('78000'), "exit_price": Decimal('78500'), "quantity": Decimal('900'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('100'), "leverage": Decimal('25')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('200'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('300'), "leverage": Decimal('35')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('200'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('300'), "leverage": Decimal('45')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('800'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('900'), "leverage": Decimal('65')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('800'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('900'), "leverage": Decimal('75')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('800'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('900'), "leverage": Decimal('97')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('800'), "leverage": Decimal('108')},
+#     {"entry_price": Decimal('98000'), "exit_price": Decimal('98500'), "quantity": Decimal('900'), "leverage": Decimal('108')}
+# ]
+
+# Расчёт
+results = [calculate_binance_metrics(**example) for example in examples]
+
+# Вывод
+for result in results:
+    print(result)
