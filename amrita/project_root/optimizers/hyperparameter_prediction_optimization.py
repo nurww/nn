@@ -279,7 +279,6 @@ class TradingEnvironment:
             for position in self.positions:
                 self.adjust_stop_loss_take_profit(position)
                 position["hold_time"] = (self.current_step - position["entry_step"]) * 100
-                # if position["hold_time"] > 7500:  # Минимальное время удержания
                 if position["hold_time"] > 2000:  # Минимальное время удержания
                     if position["direction"] == "long":
                         if self.current_price <= position["stop_loss"]:  # Достижение уровня stop_loss
@@ -668,20 +667,6 @@ class TradingEnvironment:
                 if denormalize(self.current_price) >= position['liquidation_price']:
                     self.positions.remove(position)
                     liquidation_triggered = True
-
-        # for position in self.positions:
-        #     if position["direction"] == "long" and denormalize(self.current_price) <= denormalize(position["liquidation_price"]):
-        #         logging.warning(f"Liquidation triggered for Long position at {denormalize(self.current_price)}")
-        #         liquidation_triggered = True
-        #         positions_to_remove.append(position)
-        #     elif position["direction"] == "short" and denormalize(self.current_price) >= position["liquidation_price"]:
-        #         logging.warning(f"Liquidation triggered for Short position at {denormalize(self.current_price)}")
-        #         liquidation_triggered = True
-        #         positions_to_remove.append(position)
-
-        # # Удаляем ликвидированные позиции
-        # for position in positions_to_remove:
-        #     self.positions.remove(position)
         
         # Если ликвидация произошла, сбрасываем фьючерсный баланс
         if liquidation_triggered:
@@ -872,73 +857,6 @@ class DQLAgent:
         # Уменьшаем epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
-
-    # def learn(self):
-    #     """
-    #     Обучение модели на основе опыта.
-    #     """
-    #     if len(self.memory) < self.batch_size:
-    #         return  # Недостаточно данных для обучения
-
-    #     # Сэмплируем случайные батчи
-    #     batch = random.sample(self.memory, self.batch_size)
-    #     states, actions, rewards, next_states, dones = zip(*batch)
-
-    #     # states = torch.stack([
-    #     #     torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
-    #     #     for state in states
-    #     # ])
-    #     # Преобразуем состояния в тензоры
-    #     states = []
-    #     for state in states:
-    #         try:
-    #             state_array = DQLAgent.convert_state_to_array(state)
-    #             if np.isnan(state_array).any() or np.isinf(state_array).any():
-    #                 raise ValueError("Invalid values in state array (NaN or Inf)")
-    #             states.append(torch.tensor(state_array, dtype=torch.float32).to("cuda"))
-    #         except Exception as e:
-    #             logging.error(f"Failed to process state: {state}. Error: {e}")
-    #             continue  # Пропускаем некорректное состояние
-
-    #     if not states:  # Проверяем, не пуст ли список
-    #         logging.error("No valid states to process. Skipping learning step.")
-    #         return
-
-    #     states = torch.stack(states)
-    #     print("Stacked States Shape:", states.shape)
-
-    #     # Преобразуем `actions` в тензор индексов
-    #     actions = [action[0] for action in actions]  # Извлекаем индексы действий
-    #     actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to("cuda")
-        
-    #     rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to("cuda")
-    #     next_states = torch.stack([
-    #         torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
-    #         for state in next_states
-    #     ])
-    #     dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to("cuda")
-
-    #     # Q-значения для текущих состояний
-    #     q_values = self.q_network(states).gather(1, actions)
-
-    #     # Q-значения для следующих состояний (по целевой сети)
-    #     with torch.no_grad():
-    #         max_next_q_values = self.target_network(next_states).max(dim=1, keepdim=True)[0]
-
-    #     # Целевая функция (Bellman equation)
-    #     targets = rewards + (1 - dones) * self.discount_factor * max_next_q_values
-
-    #     # Loss
-    #     loss = nn.MSELoss()(q_values, targets)
-
-    #     # Обновление сети
-    #     self.optimizer.zero_grad()
-    #     loss.backward()
-    #     self.optimizer.step()
-
-    #     # Уменьшаем epsilon
-    #     if self.epsilon > self.epsilon_min:
-    #         self.epsilon *= self.epsilon_decay
 
     def apply_rewards_and_penalties(self, reward, position_pnl, current_step, trade_log):
         penalty = 0
