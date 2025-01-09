@@ -709,3 +709,46 @@ results = [calculate_binance_metrics(**example) for example in examples]
 # Вывод
 for result in results:
     print(result)
+
+
+entry_price = 91726.75
+maintenance_margin_rate = 0.005
+maintenance_margin = 1250 * maintenance_margin_rate
+futures_balance = 20
+
+liquidation_price = entry_price + (futures_balance - maintenance_margin) / (1250 / entry_price)
+print(liquidation_price)
+
+maintenance_margin = 1250 * 0.00255
+
+liquidation_price = entry_price + (futures_balance - maintenance_margin) / (1250 / entry_price)
+print(liquidation_price)
+
+entry_price = 90000
+maintenance_margin_rate = 0.005
+maintenance_margin = 1250 * maintenance_margin_rate
+
+liquidation_price = entry_price + (futures_balance - maintenance_margin) / (1250 / entry_price)
+print(liquidation_price)
+
+maintenance_margin = 1250 * 0.00255
+
+liquidation_price = entry_price + (futures_balance - maintenance_margin) / (1250 / entry_price)
+print(liquidation_price)
+
+entry_price = 100000
+maintenance_margin_rate = 0.005
+maintenance_margin = 1250 * maintenance_margin_rate
+
+liquidation_price = entry_price + (futures_balance - maintenance_margin) / (1250 / entry_price)
+print(liquidation_price)
+
+maintenance_margin = 1250 * 0.00255
+
+liquidation_price = entry_price + (futures_balance - maintenance_margin) / (1250 / entry_price)
+print(liquidation_price)
+
+
+print(1000 // 10)
+print(500 // 10)
+print(500 // 5)

@@ -41,7 +41,7 @@ def denormalize(value):
     return value * (max_value - min_value) + min_value
 
 class TradingEnvironment:
-    def __init__(self, X, agent, initial_spot_balance=50, initial_futures_balance=50):
+    def __init__(self, X, agent, initial_spot_balance=30, initial_futures_balance=20):
         """
         Торговая среда для обучения модели.
         """
@@ -54,7 +54,7 @@ class TradingEnvironment:
         self.spot_balance = initial_spot_balance
         self.futures_balance = initial_futures_balance
         self.prev_total_balance = initial_spot_balance + initial_futures_balance  # Инициализация
-        self.leverage = 50
+        self.leverage = 125
         self.positions = []
         self.trade_log = []
         self.prev_pnl = 0
@@ -78,6 +78,42 @@ class TradingEnvironment:
                 raise ValueError(f"Row {i} contains non-numeric values: {row}")
 
         print("Validation passed! Structure of X is correct.")
+
+    def redistribute_balance(self):
+        """
+        Перераспределяет баланс между спотом и фьючерсами, основываясь на общем балансе.
+        """
+        # logging.info(f"1 - {self.spot_balance:.5f} {self.futures_balance:.5f}")
+        total_balance = self.spot_balance + self.futures_balance
+        # Рассчитываем BB (Big Blind)
+        BB = max(total_balance / 10, 1)  # Минимум 1
+
+        # Целевые балансы
+        # Целевой баланс для фьючерсов: 2BB
+        target_futures_balance = 2 * BB
+        target_spot_balance = total_balance - target_futures_balance
+        # logging.info(f"2 - {target_spot_balance:.5f} {target_futures_balance:.5f}")
+
+        # Проверка, чтобы на споте не оставалось меньше 0
+        if target_spot_balance < 0:
+            target_futures_balance += target_spot_balance  # Добавляем недостающую сумму в фьючерсы
+            target_spot_balance = 0
+        # logging.info(f"3 - {target_spot_balance:.5f} {target_futures_balance:.5f}")
+
+        # Проверяем ограничение на фьючерсах (максимум 3BB)
+        if target_futures_balance > 3 * BB:
+            excess = target_futures_balance - 3 * BB
+            target_spot_balance += excess
+            target_futures_balance = 3 * BB
+        # logging.info(f"4 - {target_spot_balance:.5f} {target_futures_balance:.5f}")
+        
+        # logging.info(f"5 - {self.spot_balance:.5f} {self.futures_balance:.5f}")
+        # Обновляем баланс
+        self.spot_balance = target_spot_balance
+        self.futures_balance = target_futures_balance
+
+        logging.info(f"Redistributed balances: Spot: {self.spot_balance:.5f}, Futures: {self.futures_balance:.5f}, BB: {BB:.5f}")
+        return BB
 
     def retrospective_analysis(self, closed_position, future_data):
         """
@@ -105,11 +141,11 @@ class TradingEnvironment:
 
         # Ищем лучшую цену для закрытия
         if direction == "long":
-            best_exit_price = future_data.max()
-            best_pnl = (best_exit_price - entry_price) * position_size
+            best_exit_price = denormalize(future_data.max())
+            best_pnl = (denormalize(best_exit_price) - entry_price) * (position_size / denormalize(self.current_price))
         else:  # short
-            best_exit_price = future_data.min()
-            best_pnl = (entry_price - best_exit_price) * position_size
+            best_exit_price = denormalize(future_data.min())
+            best_pnl = (entry_price - denormalize(best_exit_price)) * (position_size / denormalize(self.current_price))
 
         # Если лучшая цена отличается от реальной цены выхода, создаём опыт
         actual_pnl = closed_position["pnl"]
@@ -156,10 +192,10 @@ class TradingEnvironment:
         Сброс среды до начального состояния.
         """
         self.current_step = 0
-        self.spot_balance = 50
-        self.futures_balance = 50
-        self.prev_total_balance = 50 + 50  # Инициализация
-        self.leverage = 50
+        self.spot_balance = 30
+        self.futures_balance = 20
+        self.prev_total_balance = self.spot_balance + self.futures_balance  # Инициализация
+        self.leverage = 125
         self.positions = []
         self.trade_log = []
         self.prev_pnl = 0
@@ -192,32 +228,41 @@ class TradingEnvironment:
             ]),
             "positions": self.positions
         }
-        # print(f"Generated state: {state}")
+        # print(f"Generated state: {len(state['state_data'])}")
         return state
 
     def step(self, action):
         reward = 0
         done = False
+
+        # print(self.X.shape)
+
+        # logging.info(f"Action {action}")
         
         # Проверяем, не превышает ли current_step размер данных
         if self.current_step >= len(self.X):
             logging.warning("Current step exceeds data length. Ending the episode.")
             return self._get_state(), 0, True  # Завершаем эпизод
 
-        # Проверка завершения эпизода
-        if self.futures_balance <= 0:
-            # Переводим средства со спота на фьючерсы перед завершением эпизода
-            if self.futures_balance <= 0 and self.spot_balance > 5:
-                transfer_amount = self._transfer_balance("spot_to_futures")
-                logging.info(f"Transferred {transfer_amount:.2f} from Spot to Futures to avoid ending the episode.")
-            else:
-                done = True
-                logging.info("Episode ended due to insufficient futures balance or reaching the end of data.")
+        # # Проверка завершения эпизода
+        # if self.futures_balance <= 0:
+        #     # Переводим средства со спота на фьючерсы перед завершением эпизода
+        #     if self.futures_balance <= 0 and self.spot_balance > 5:
+        #         transfer_amount = self._transfer_balance("spot_to_futures")
+        #         logging.info(f"Transferred {transfer_amount:.5f} from Spot to Futures to avoid ending the episode.")
+        #     else:
+        #         done = True
+        #         logging.info("Episode ended due to insufficient futures balance or reaching the end of data.")
                     
         # Обновление текущей цены
         self.current_price = self.X[self.current_step][0]  # Цена текущей свечи
         trends = self.analyze_trends()
         # logging.info(f"Current price: {self.current_price}")
+        
+        # Штраф за ликвидацию через reward
+        if self._check_liquidation():
+            reward -= 10  # Штраф за ликвидацию
+            return self._get_state(), reward, done
 
         if action[0] == 0:  # Open Long
             if trends["5m_trend_strength"] > 0 and trends["1m_trend_strength"] > 0:
@@ -252,26 +297,16 @@ class TradingEnvironment:
                             reward += total_pnl * 0.1
                 else:
                     continue  # Пропускаем закрытие позиции
-        elif action[0] == 3:  # Transfer from spot to futures
-            # print("Transferring balance from Spot to Futures")
-            self._transfer_balance("spot_to_futures")
-            reward -= 1  # Штраф за перевод
-        elif action[0] == 4:  # Transfer from futures to spot
-            # print("Transferring balance from Futures to Spot")
-            self._transfer_balance("futures_to_spot")
-            reward -= 1  # Штраф за перевод
-        elif action[0] == 5:  # Hold
-            for position in self.positions:
-                reward += self._calculate_pnl(position) * 0.005
+        elif action[0] == 3:  # Hold
+            pass
                 
+        for position in self.positions:
+            reward += self._calculate_pnl(position) * 0.005
+        
         # Вознаграждение за общий баланс
         total_balance = self.spot_balance + self.futures_balance
         reward += (total_balance - self.prev_total_balance) * 0.05
         self.prev_total_balance = total_balance
-        
-        # Штраф за ликвидацию через reward
-        if self._check_liquidation():
-            reward -= 10  # Штраф за ликвидацию
         
         # Логируем состояние после выполнения действия
         self._log_balances()
@@ -282,8 +317,8 @@ class TradingEnvironment:
         # logging.info(f"Step: {self.current_step}, Action: {action}, Reward: {reward}, Total Reward: {self.pnl}")
         # Логируем состояние только каждые 100 шагов
         if self.current_step % 100 == 0:
-            logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
-                        f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
+            logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.5f}, "
+                        f"Futures balance: {self.futures_balance:.5f}, Positions: {len(self.positions)}")
             if self.positions:
                 for i, position in enumerate(self.positions, start=1):
                     logging.info(f"Position {i}: {position}")
@@ -293,33 +328,21 @@ class TradingEnvironment:
     def _open_position(self, direction):
         # Проверка наличия активных позиций
         if len(self.positions) >= 1:  # Ограничение на одну активную позицию
-            logging.warning("Position not opened: An active position already exists.")
+            # logging.warning("Position not opened: An active position already exists.")
             return
         
-        # Максимальная доля от баланса, которую можно использовать
-        max_risk_percent = 0.02  # 2% риска на сделку
-        min_position_size = 10  # Минимальный размер позиции
-        max_position_size = self.futures_balance * 0.8  # Максимум 80% от баланса
+        # Расчет BB
+        BB = self.redistribute_balance()  # Перераспределяем баланс для получения BB
 
-        # Уверенность модели (например, трендовая сила)
-        trend_strength = self.X[self.current_step][98]  # Используем `trend_strength` из 5-минутного интервала
-        confidence_factor = max(0.1, min(1.0, abs(trend_strength)))  # Нормализуем уверенность от 0.1 до 1.0
-
-        # Рассчитываем базовый размер позиции
-        base_position_size = self.futures_balance * max_risk_percent * confidence_factor
-
-        # Устанавливаем окончательный размер позиции в пределах лимитов
-        position_size = float(max(min(base_position_size, max_position_size), min_position_size))
-
-        if self.futures_balance <= 0:
-            logging.warning("Insufficient futures balance to open position.")
+        position_size = BB
+        total_position_size = self.leverage * position_size / denormalize(self.current_price)
+        
+        if self.futures_balance <= position_size / denormalize(self.current_price):
+            # logging.warning("Insufficient futures balance to open position.")
             return
-
-        if position_size > self.futures_balance * self.leverage:
-            position_size = self.futures_balance * self.leverage  # Ограничиваем плечом
-
-        liquidation_price = self._calculate_liquidation_price(position_size, direction)
-
+        
+        liquidation_price = self._calculate_liquidation_price(total_position_size, direction)
+        self.futures_balance -= position_size / denormalize(self.current_price)
         # Установка stop-loss и take-profit
         stop_loss = self.X[self.current_step][94]  # low_price_normalized из 5-минутного интервала
         take_profit = self.X[self.current_step][95]  # high_price_normalized из 5-минутного интервала
@@ -329,7 +352,7 @@ class TradingEnvironment:
         self.positions.append({
             "position_id": position_id,
             "entry_price": denormalize(self.current_price),
-            "position_size": position_size,
+            "position_size": total_position_size,
             "direction": direction,
             "liquidation_price": liquidation_price,
             "entry_step": self.current_step,
@@ -348,11 +371,11 @@ class TradingEnvironment:
 
         logging.info(
             f"Opened {direction} - Entry price: {denormalize(self.current_price):.5f}, "
-            f"Size: {position_size:.5f}, Liquidation price: {denormalize(liquidation_price):.5f}, "
+            f"Size: {total_position_size:.5f}, Liquidation price: {liquidation_price:.5f}, "
         )
 
         logging.info(
-            f"Confidence factor: {confidence_factor:.5f}, "
+            # f"Confidence factor: {confidence_factor:.5f}, "
             f"Futures balance: {self.futures_balance:.5f}"
         )
 
@@ -365,7 +388,6 @@ class TradingEnvironment:
         errors = []
         total_pnl = 0
         total_reward = 0
-        remaining_positions = []
 
         # Устанавливаем комиссию как долю от размера позиции
         commission_rate = 0.1  # 0.1% комиссии как на Binance
@@ -374,22 +396,13 @@ class TradingEnvironment:
             reward = 0  # Инициализация reward
             try:
                 pnl = self._calculate_pnl(position)
-                logging.info(f"BEFORE - PnL BEFORE ALL: {pnl}")
-                position_size = position.get("position_size", 0)
+                position_size = position.get("position_size", 0) / denormalize(self.current_price)
                 direction = position.get("direction", 0)
                 commission = position_size * commission_rate
-                logging.info(f"BEFORE Futures balance: {self.futures_balance} - PnL: {pnl} - Total PnL: {total_pnl} - Commision: {commission}")
                 pnl -= commission
                 total_pnl += pnl
-                self.futures_balance += pnl
 
-                # Проверка на ликвидацию
-                if self.futures_balance <= 0:
-                    logging.warning("Futures balance is insufficient. Triggering liquidation.")
-                    self.futures_balance = 0
-                    break  # Прекращаем обработку позиций при ликвидации
-
-                logging.info(f"AFTER Futures balance: {self.futures_balance} - PnL: {pnl} - Total PnL: {total_pnl} - Commision: {commission}")
+                self.futures_balance += total_pnl
                 successfully_closed.append(i)
 
                 # Обновляем PnL в позиции
@@ -431,22 +444,20 @@ class TradingEnvironment:
                 })
 
         # Учет дополнительной комиссии на общий PnL (опционально)
-        total_pnl -= abs(total_pnl) * commission_rate  # Если нужно еще одно снижение общего PnL
-        self.pnl = total_pnl
+        # total_pnl -= abs(total_pnl) * commission_rate  # Если нужно еще одно снижение общего PnL
+        # self.pnl = total_pnl
 
         # Передача total_reward агенту
         if total_reward != 0:
             state = self._get_state()  # Получаем текущее состояние
             self.agent.store_experience(state, [5, []], total_reward, state, True)  # Используем фиктивное действие [5, []]
         
-        # Обновляем оставшиеся позиции
-        self.positions = remaining_positions
-
         # Логируем окончательный баланс
-        logging.info(f"Final Futures balance after closing positions: {self.futures_balance:.2f}")
+        logging.info(f"Final Futures balance after closing positions: {self.futures_balance:.5f} Spot {self.spot_balance:.5f}")
         if self.futures_balance <= 0:
             logging.warning("Futures balance reached zero. All positions liquidated.")
 
+        self.positions = []  # Закрываем все позиции
         return total_pnl, successfully_closed, errors
 
     def generate_trade_report(self):
@@ -459,21 +470,6 @@ class TradingEnvironment:
         # Проходим по каждому логу в trade_log
         for log in self.trade_log:
             if log["action"] == "close":
-                # Собираем данные для отчета
-                # report_data.append({
-                #     "Вход (шаг)": log.get("entry_step", "N/A"),
-                #     "Выход (шаг)": log.get("step", "N/A"),
-                #     "Цена входа": f"{log.get('entry_price', 'N/A'):.2f}" if isinstance(log.get("entry_price"), (int, float)) else "N/A",
-                #     "Цена выхода": f"{log.get('exit_price', 'N/A'):.2f}" if isinstance(log.get("exit_price"), (int, float)) else "N/A",
-                #     "Направление": log.get("direction", "N/A"),
-                #     "Прибыль/Убыток": f"{log.get('pnl', 'N/A'):.2f}" if isinstance(log.get("pnl"), (int, float)) else "N/A",
-                #     "Размер позиции": f"{log.get('position_size', 'N/A'):.2f}" if isinstance(log.get("position_size"), (int, float)) else "N/A",
-                #     "Комиссия": f"{log.get('commission', 'N/A'):.6f}" if isinstance(log.get("commission"), (int, float)) else "N/A",
-                #     "Stop Loss": log.get("stop_loss", "N/A"),
-                #     "Take Profit": log.get("take_profit", "N/A"),
-                #     "Конечный баланс (Spot)": f"{log.get('exit_spot_balance', 'N/A'):.2f}" if isinstance(log.get("exit_spot_balance"), (int, float)) else "N/A",
-                #     "Конечный баланс (Futures)": f"{log.get('exit_futures_balance', 'N/A'):.2f}" if isinstance(log.get("exit_futures_balance"), (int, float)) else "N/A",
-                # })
                 report_data.append({
                     "Вход (шаг)": log.get("entry_step", "N/A"),
                     "Выход (шаг)": log.get("step", "N/A"),
@@ -488,7 +484,6 @@ class TradingEnvironment:
                     "Конечный баланс (Spot)": log.get("exit_spot_balance", "N/A"),
                     "Конечный баланс (Futures)": log.get("exit_futures_balance", "N/A"),
                 })
-
 
         # Проверяем, есть ли данные для отчета
         if not report_data:
@@ -506,7 +501,7 @@ class TradingEnvironment:
         logging.info(f"Current Last Step: {self.current_step}")
         logging.info(f"Spot balance: {self.spot_balance}, Futures balance: {self.futures_balance}")
         # Логируем метрики
-        logging.info(f"Win Rate: {win_rate:.2f}, Profitability Ratio: {profitability_ratio:.2f}")
+        logging.info(f"Win Rate: {win_rate:.5f}, Profitability Ratio: {profitability_ratio:.5f}")
 
         # Настройки pandas для отображения
         pd.set_option("display.max_rows", None)
@@ -521,10 +516,10 @@ class TradingEnvironment:
         """
         total_pnl = sum(self._calculate_pnl(position) for position in self.positions)
         self.futures_balance += total_pnl
-        # logging.info(f"Updated Futures balance with PnL: {self.futures_balance:.2f}")
+        # logging.info(f"Updated Futures balance with PnL: {self.futures_balance:.5f}")
 
     def _log_balances(self):
-        # logging.info(f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
+        # logging.info(f"Spot balance: {self.spot_balance:.5f}, Futures balance: {self.futures_balance:.5f}")
         # for position in self.positions:
             # logging.info(f"Position: {position}")
         return
@@ -550,59 +545,62 @@ class TradingEnvironment:
                 logging.info("Futures balance too low or insufficient margin for transfer to spot.")
 
         if transfer_amount > 0:
-            logging.info(f"Transferred {transfer_amount:.2f} from {direction.replace('_', ' ')}. "
-                        f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
+            logging.info(f"Transferred {transfer_amount:.5f} from {direction.replace('_', ' ')}. "
+                        f"Spot balance: {self.spot_balance:.5f}, Futures balance: {self.futures_balance:.5f}")
         return transfer_amount
 
-    # def _transfer_balance(self, direction):
+    # def _calculate_liquidation_price(self, position_size, direction):
     #     """
-    #     Перемещает средства между spot и futures с учетом активных позиций и минимальной необходимости.
+    #     Рассчитывает ликвидационную цену для позиции.
     #     """
-    #     transfer_amount = 0
-    #     min_transfer_threshold = 5  # Минимальная сумма перевода
+    #     entry_price = denormalize(self.current_price)
+    #     leverage = self.leverage
+    #     margin = self.futures_balance
+    #     maintenance_margin_rate = 0.05  # 0.5% для фьючерсов (может варьироваться)
+    #     maintenance_margin = (position_size / denormalize(entry_price)) * denormalize(entry_price) * maintenance_margin_rate
 
-    #     if direction == "spot_to_futures":
-    #         # Убедимся, что перевод имеет смысл
-    #         if self.spot_balance > min_transfer_threshold:
-    #             transfer_amount = min(self.spot_balance * 0.1, self.spot_balance)
-    #             self.spot_balance -= transfer_amount
-    #             self.futures_balance += transfer_amount
-    #         else:
-    #             logging.info("Spot balance too low for transfer to futures.")
-    #     elif direction == "futures_to_spot":
-    #         # Убедимся, что есть достаточно маржи для открытых позиций
-    #         min_required_margin = sum(pos["position_size"] / self.leverage for pos in self.positions)
-    #         if self.futures_balance - min_required_margin > min_transfer_threshold:
-    #             transfer_amount = min(self.futures_balance * 0.1, self.futures_balance - min_required_margin)
-    #             self.futures_balance -= transfer_amount
-    #             self.spot_balance += transfer_amount
-    #         else:
-    #             logging.info("Futures balance too low or insufficient margin for transfer to spot.")
+    #     if direction == "long":
+    #         # Формула для лонга
+    #         # liquidation_price = entry_price - (margin - maintenance_margin) / (position_size * leverage)
+    #         liquidation_price = entry_price - (margin - maintenance_margin) / position_size
+    #         # logging.info(f"liquidation_priceliquidation_price {denormalize(liquidation_price)}")
+    #         logging.info(f"LIQQQ {margin} {entry_price} {liquidation_price} {maintenance_margin_rate} {maintenance_margin}")
+    #     elif direction == "short":
+    #         # Формула для шорта
+    #         # liquidation_price = entry_price + (margin - maintenance_margin) / (position_size * leverage)
+    #         liquidation_price = entry_price + (maintenance_margin - margin) / position_size
+    #         # logging.info(f"liquidation_priceliquidation_price {denormalize(liquidation_price)}")
+    #         logging.info(f"LIQQQ {margin} {entry_price} {liquidation_price} {maintenance_margin_rate} {maintenance_margin}")
+    #     else:
+    #         raise ValueError("Invalid direction: must be 'long' or 'short'")
 
-    #     if transfer_amount > 0:
-    #         logging.info(f"Transferred {transfer_amount:.2f} from {direction.replace('_', ' ')}. "
-    #                     f"Spot balance: {self.spot_balance:.2f}, Futures balance: {self.futures_balance:.2f}")
-    #     return transfer_amount
+    #     return round(liquidation_price, 5)  # Округляем до 5 знаков
 
     def _calculate_liquidation_price(self, position_size, direction):
         """
-        Рассчитывает ликвидационную цену для позиции.
+        Рассчитывает уровень ликвидации для лонга и шорта.
+        
+        :param entry_price: float, цена входа
+        :param position_size: float, размер позиции в долларах
+        :param leverage: int, плечо
+        :param futures_balance: float, текущий баланс фьючерсного кошелька
+        :param maintenance_margin_rate: float, минимальная маржа (например, 0.005 для 0.5%)
+        :param direction: str, направление сделки ("long" или "short")
+        :return: float, уровень ликвидации
         """
-        entry_price = self.current_price
-        leverage = self.leverage
-        margin = self.futures_balance
-        maintenance_margin_rate = 0.05  # 0.5% для фьючерсов (может варьироваться)
-        maintenance_margin = position_size * entry_price * maintenance_margin_rate
+        entry_price = denormalize(self.current_price)
+        maintenance_margin_rate = 0.00255
+        # Рассчитываем техническую маржу
+        maintenance_margin = position_size * maintenance_margin_rate
 
+        # Рассчитываем уровень ликвидации
         if direction == "long":
-            # Формула для лонга
-            liquidation_price = entry_price - (margin - maintenance_margin) / (position_size * leverage)
+            liquidation_price = entry_price - (self.futures_balance - maintenance_margin) / position_size
         elif direction == "short":
-            # Формула для шорта
-            liquidation_price = entry_price + (margin - maintenance_margin) / (position_size * leverage)
+            liquidation_price = entry_price + (self.futures_balance - maintenance_margin) / position_size
         else:
-            raise ValueError("Invalid direction: must be 'long' or 'short'")
-
+            raise ValueError("Direction must be 'long' or 'short'")
+        
         return round(liquidation_price, 5)  # Округляем до 5 знаков
 
     def _calculate_reward(self, position):
@@ -640,29 +638,16 @@ class TradingEnvironment:
 
         return reward
 
-    # def _calculate_reward(self, position):
-    #     """
-    #     Рассчитывает награду на основе PnL.
-    #     """
-    #     pnl = self._calculate_pnl(position)
-    #     reward = pnl - abs(pnl) * 0.001  # Учет комиссии
-    #     logging.debug(f"Calculating reward: PnL = {pnl}, Reward before commission: {reward}")
-        
-    #     if pnl > 0:
-    #         return reward * 1.5  # Награда за прибыль
-    #     else:
-    #         return reward * 0.5  # Снижение награды за убыток
-
     def _calculate_pnl(self, position):
         """
         Расчет PnL по позиции.
         """
         if position["direction"] == "long":
-            logging.info(f"Current Price: {denormalize(self.current_price)}, Entry Price: {position['entry_price']}, Position Size: {position['position_size']}")
-            return (denormalize(self.current_price) - position["entry_price"]) * abs(position["position_size"])
+            # logging.info(f"Current Price: {denormalize(self.current_price)}, Entry Price: {position['entry_price']}, Position Size: {position['position_size']}")
+            return (denormalize(self.current_price) - position["entry_price"]) * (position["position_size"] / self.current_price)
         elif position["direction"] == "short":
-            logging.info(f"Current Price: {denormalize(self.current_price)}, Entry Price: {position['entry_price']}, Position Size: {position['position_size']}")
-            return (position["entry_price"] - denormalize(self.current_price)) * abs(position["position_size"])
+            # logging.info(f"Current Price: {denormalize(self.current_price)}, Entry Price: {position['entry_price']}, Position Size: {position['position_size']}")
+            return (position["entry_price"] - denormalize(self.current_price)) * (position["position_size"] / self.current_price)
         return 0
 
     def _check_liquidation(self):
@@ -671,76 +656,49 @@ class TradingEnvironment:
         Возвращает True, если произошла ликвидация, иначе False.
         """
         liquidation_triggered = False
-        remaining_positions = []  # Оставшиеся позиции после ликвидации
+        # positions_to_remove = []
 
         for position in self.positions:
-            if position["direction"] == "long" and self.current_price <= position["liquidation_price"]:
-                logging.warning(f"Liquidation triggered for Long position at {self.current_price}")
-                liquidation_triggered = True
-            elif position["direction"] == "short" and self.current_price >= position["liquidation_price"]:
-                logging.warning(f"Liquidation triggered for Short position at {self.current_price}")
-                liquidation_triggered = True
-            else:
-                remaining_positions.append(position)  # Позиции, которые не ликвидировались
+            # logging.info(f"Liquidation check: {position['liquidation_price']}")
+            if position["direction"] == "long":
+                if denormalize(self.current_price) <= position['liquidation_price']:
+                    self.positions.remove(position)
+                    liquidation_triggered = True
+            elif position["direction"] == "short":
+                if denormalize(self.current_price) >= position['liquidation_price']:
+                    self.positions.remove(position)
+                    liquidation_triggered = True
 
-        # Обновляем список позиций
-        self.positions = remaining_positions
+        # for position in self.positions:
+        #     if position["direction"] == "long" and denormalize(self.current_price) <= denormalize(position["liquidation_price"]):
+        #         logging.warning(f"Liquidation triggered for Long position at {denormalize(self.current_price)}")
+        #         liquidation_triggered = True
+        #         positions_to_remove.append(position)
+        #     elif position["direction"] == "short" and denormalize(self.current_price) >= position["liquidation_price"]:
+        #         logging.warning(f"Liquidation triggered for Short position at {denormalize(self.current_price)}")
+        #         liquidation_triggered = True
+        #         positions_to_remove.append(position)
 
+        # # Удаляем ликвидированные позиции
+        # for position in positions_to_remove:
+        #     self.positions.remove(position)
+        
         # Если ликвидация произошла, сбрасываем фьючерсный баланс
         if liquidation_triggered:
             self.futures_balance = max(self.futures_balance, 0)  # Баланс не может быть меньше нуля
-            logging.info(f"Liquidation occurred. Updated Futures balance: {self.futures_balance:.2f}")
+            logging.info(f"Liquidation occurred at price {denormalize(self.current_price)}. Updated Futures balance: {self.futures_balance:.5f}")
         return liquidation_triggered
-
-    # def _check_liquidation(self):
-    #     """
-    #     Проверяет ликвидацию всех открытых позиций.
-    #     Возвращает True, если произошла ликвидация, иначе False.
-    #     """
-    #     liquidation_triggered = False  # Флаг ликвидации
-    #     total_pnl = 0  # Общий PnL от закрытых позиций
-    #     remaining_positions = []  # Оставшиеся после ликвидации позиции
-
-    #     for position in self.positions:
-    #         if position["direction"] == "long" and self.current_price <= position["liquidation_price"]:
-    #             logging.warning(f"Liquidation triggered for Long position at {self.current_price}")
-    #             loss = position["position_size"] / self.leverage
-    #             self.futures_balance -= loss
-    #             total_pnl += self._calculate_pnl(position)  # Учитываем PnL от ликвидируемой позиции
-    #             liquidation_triggered = True
-
-    #         elif position["direction"] == "short" and self.current_price >= position["liquidation_price"]:
-    #             logging.warning(f"Liquidation triggered for Short position at {self.current_price}")
-    #             loss = position["position_size"] / self.leverage
-    #             self.futures_balance -= loss
-    #             total_pnl += self._calculate_pnl(position)  # Учитываем PnL от ликвидируемой позиции
-    #             liquidation_triggered = True
-
-    #         else:
-    #             remaining_positions.append(position)  # Оставляем позиции, не затронутые ликвидацией
-
-    #     # Обновляем оставшиеся позиции
-    #     self.positions = remaining_positions
-
-    #     # Если ликвидация произошла, обновляем балансы
-    #     if liquidation_triggered:
-    #         self.spot_balance += max(0, self.futures_balance)  # Переводим остаток в spot
-    #         self.futures_balance = max(0, self.futures_balance)
-    #         logging.info(f"Liquidation occurred. Total PnL: {total_pnl:.5f}, Remaining futures balance: {self.futures_balance:.2f}")
-    #         return True
-
-    #     return False
 
     def _log_state(self):
         # Логируем состояние только каждые 100 шагов
         if self.current_step % 100 == 0:
-            logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
-                        f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
+            logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.5f}, "
+                        f"Futures balance: {self.futures_balance:.5f}, Positions: {len(self.positions)}")
             if self.positions:
                 for i, position in enumerate(self.positions, start=1):
                     logging.info(f"Position {i}: {position}")
-        # logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.2f}, "
-        #              f"Futures balance: {self.futures_balance:.2f}, Positions: {len(self.positions)}")
+        # logging.info(f"Step: {self.current_step}, Spot balance: {self.spot_balance:.5f}, "
+        #              f"Futures balance: {self.futures_balance:.5f}, Positions: {len(self.positions)}")
         # if self.positions:
         #     for i, position in enumerate(self.positions, start=1):
         #         logging.info(f"Position {i}: {position}")
@@ -800,7 +758,7 @@ class DQLAgent:
             raise ValueError("State must be a dictionary containing 'positions'.")
         if "positions" not in state or not isinstance(state["positions"], list):
             logging.error(f"Invalid 'positions' in state: {state.get('positions')}")
-            return [5, []]  # Действие ожидания при некорректных данных
+            return [3, []]  # Действие ожидания при некорректных данных
 
         action_index = 0
         positions_to_close = []
@@ -831,34 +789,66 @@ class DQLAgent:
     def convert_state_to_array(state):
         if isinstance(state, dict) and "state_data" in state:
             return state["state_data"]
-        # print(f"Invalid state in `convert_state_to_array`: {state}")
         raise TypeError("State must be a dictionary containing 'state_data'.")
 
     def learn(self):
         """
         Обучение модели на основе опыта.
         """
+        # Проверяем, достаточно ли данных для обучения
         if len(self.memory) < self.batch_size:
+            # logging.warning("Not enough data in memory to sample a batch.")
             return  # Недостаточно данных для обучения
 
         # Сэмплируем случайные батчи
         batch = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        states = torch.stack([
-            torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
-            for state in states
-        ])
+        # Преобразуем состояния в тензоры
+        states = []
+        for state in states:
+            try:
+                state_array = DQLAgent.convert_state_to_array(state)
+                if np.isnan(state_array).any() or np.isinf(state_array).any():
+                    raise ValueError("Invalid values in state array (NaN or Inf)")
+                states.append(torch.tensor(state_array, dtype=torch.float32).to("cuda"))
+            except Exception as e:
+                logging.error(f"Failed to process state: {state}. Error: {e}")
+                continue  # Пропускаем некорректное состояние
+
+        if not states:  # Проверяем, не пуст ли список
+            # logging.error("No valid states to process. Skipping learning step.")
+            return
+
+        states = torch.stack(states)
+        logging.info(f"Stacked States Shape: {states.shape}")
 
         # Преобразуем `actions` в тензор индексов
         actions = [action[0] for action in actions]  # Извлекаем индексы действий
         actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to("cuda")
-        # print(f"Tensor shape after conversion: {actions.shape}")
+
+        # Преобразуем `rewards`
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to("cuda")
-        next_states = torch.stack([
-            torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
-            for state in next_states
-        ])
+
+        # Преобразуем следующие состояния
+        next_states = []
+        for state in next_states:
+            try:
+                state_array = DQLAgent.convert_state_to_array(state)
+                if np.isnan(state_array).any() or np.isinf(state_array).any():
+                    raise ValueError("Invalid values in next state array (NaN or Inf)")
+                next_states.append(torch.tensor(state_array, dtype=torch.float32).to("cuda"))
+            except Exception as e:
+                logging.error(f"Failed to process next state: {state}. Error: {e}")
+                continue
+
+        if not next_states:  # Проверяем, не пуст ли список
+            logging.error("No valid next states to process. Skipping learning step.")
+            return
+
+        next_states = torch.stack(next_states)
+
+        # Преобразуем `dones`
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to("cuda")
 
         # Q-значения для текущих состояний
@@ -882,6 +872,73 @@ class DQLAgent:
         # Уменьшаем epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
+
+    # def learn(self):
+    #     """
+    #     Обучение модели на основе опыта.
+    #     """
+    #     if len(self.memory) < self.batch_size:
+    #         return  # Недостаточно данных для обучения
+
+    #     # Сэмплируем случайные батчи
+    #     batch = random.sample(self.memory, self.batch_size)
+    #     states, actions, rewards, next_states, dones = zip(*batch)
+
+    #     # states = torch.stack([
+    #     #     torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
+    #     #     for state in states
+    #     # ])
+    #     # Преобразуем состояния в тензоры
+    #     states = []
+    #     for state in states:
+    #         try:
+    #             state_array = DQLAgent.convert_state_to_array(state)
+    #             if np.isnan(state_array).any() or np.isinf(state_array).any():
+    #                 raise ValueError("Invalid values in state array (NaN or Inf)")
+    #             states.append(torch.tensor(state_array, dtype=torch.float32).to("cuda"))
+    #         except Exception as e:
+    #             logging.error(f"Failed to process state: {state}. Error: {e}")
+    #             continue  # Пропускаем некорректное состояние
+
+    #     if not states:  # Проверяем, не пуст ли список
+    #         logging.error("No valid states to process. Skipping learning step.")
+    #         return
+
+    #     states = torch.stack(states)
+    #     print("Stacked States Shape:", states.shape)
+
+    #     # Преобразуем `actions` в тензор индексов
+    #     actions = [action[0] for action in actions]  # Извлекаем индексы действий
+    #     actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to("cuda")
+        
+    #     rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to("cuda")
+    #     next_states = torch.stack([
+    #         torch.tensor(DQLAgent.convert_state_to_array(state), dtype=torch.float32).to("cuda")
+    #         for state in next_states
+    #     ])
+    #     dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to("cuda")
+
+    #     # Q-значения для текущих состояний
+    #     q_values = self.q_network(states).gather(1, actions)
+
+    #     # Q-значения для следующих состояний (по целевой сети)
+    #     with torch.no_grad():
+    #         max_next_q_values = self.target_network(next_states).max(dim=1, keepdim=True)[0]
+
+    #     # Целевая функция (Bellman equation)
+    #     targets = rewards + (1 - dones) * self.discount_factor * max_next_q_values
+
+    #     # Loss
+    #     loss = nn.MSELoss()(q_values, targets)
+
+    #     # Обновление сети
+    #     self.optimizer.zero_grad()
+    #     loss.backward()
+    #     self.optimizer.step()
+
+    #     # Уменьшаем epsilon
+    #     if self.epsilon > self.epsilon_min:
+    #         self.epsilon *= self.epsilon_decay
 
     def apply_rewards_and_penalties(self, reward, position_pnl, current_step, trade_log):
         penalty = 0
@@ -944,10 +1001,10 @@ class IntervalLSTMModel(nn.Module):
 
 def fetch_orderbook_data() -> pd.DataFrame:
     logging.info(f"Fetching data for orderbook")
-    # query = f"SELECT * FROM order_book_data order by id LIMIT 500000"
+    # query = f"SELECT * FROM order_book_data order by id LIMIT 250000"
     # query = f"SELECT * FROM order_book_data order by id LIMIT 10000"
-    query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 35000"
-    # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 70000"
+    # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 35000"
+    query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 70000"
     # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 25000"
     # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 6000"
     # query = f"SELECT * FROM order_book_data WHERE id <= '686674' order by id LIMIT 1000"
@@ -1395,6 +1452,9 @@ def prepare_data_for_orderbook_non_overlapping(orderbook_data: pd.DataFrame) -> 
 
     # Обрабатываем данные стакана без перекрытия
     for i in range(len(orderbook_data)):
+        # Логирование каждые 50000 строк
+        if i % 50000 == 0:
+            logging.info(f"Processed {i} rows out of {len(orderbook_data)}")
         # Извлекаем текущую строку стакана
         orderbook_row = orderbook_data.iloc[i].drop(["id", "timestamp"]).values.astype(np.float32)
         
@@ -1431,6 +1491,7 @@ def prepare_data_for_orderbook_non_overlapping(orderbook_data: pd.DataFrame) -> 
         # Добавляем результат в X
         X.append(combined_data)
 
+    logging.info(f"Data preparation complete. Total rows processed: {len(orderbook_data)}")
     return np.array(X)
 
 # Убедимся, что границы можно легко увидеть
@@ -1495,7 +1556,7 @@ def prepare_targets(orderbook_data, sequence_length, target_column="mid_price"):
         logging.info(f"Generated {len(y)} targets.")
 
     # Преобразуем в Tensor
-    y = torch.tensor(y, dtype=torch.float32)
+    y = torch.tensor(y, dtype=torch.float32).to("cuda")
     return y
 
 def log_predictions(model, X_train, y_train):
@@ -1713,17 +1774,17 @@ def objective(trial):
     # print(f"Sample from X[0]: {X[3].shape}")
 
     # Путь к файлу сохраненной модели
-    MODEL_PATH = "model/saved_trading_model.pth"
+    MODEL_PATH = "model/saved_trading_model_new.pth"
     # Инициализация агента
     if os.path.exists(MODEL_PATH):
         print("Загрузка сохраненной модели...")
-        agent = DQLAgent(state_size=141, action_size=6)  # Создаем объект агента
+        agent = DQLAgent(state_size=141, action_size=4)  # Создаем объект агента
         agent.q_network.load_state_dict(torch.load(MODEL_PATH, weights_only=True))  # Загружаем веса в основную сеть
         agent.update_target_network()  # Синхронизируем целевую сеть
         print("Модель успешно загружена.")
     else:
         print("Сохраненная модель не найдена. Создание новой модели...")
-        agent = DQLAgent(state_size=141, action_size=6)  # Создаем нового агента
+        agent = DQLAgent(state_size=141, action_size=4)  # Создаем нового агента
     
     # Инициализация среды
     env = TradingEnvironment(X, agent)
@@ -1765,9 +1826,11 @@ def objective(trial):
 
             if done:
                 print(f"Episode {episode + 1}: Total Reward = {total_reward}")
+                # Настройка форматирования чисел
                 trade_report = env.generate_trade_report()
+                with pd.option_context('display.float_format', '{:.6f}'.format):  # Устанавливаем фиксированное количество знаков после запятой
+                    logging.info(f"Trade report: \n{trade_report}")
                 # print(trade_report)
-                logging.info(f"Trade report: \n{trade_report}")
                 logging.info(f"Episode {episode + 1}: Total Reward = {total_reward}")
                 break
 
