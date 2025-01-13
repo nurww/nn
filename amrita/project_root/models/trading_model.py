@@ -1,5 +1,3 @@
-# trading_model.py
-
 import sys
 import os
 from binance.client import Client

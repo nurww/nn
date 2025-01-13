@@ -21,7 +21,7 @@ MYSQL_CONFIG = {
 }
 
 FIXED_BOUNDARIES = {
-    "mid_price": {"min": 0, "max": 115000},
+    "mid_price": {"min": 0, "max": 125000},
     "sum_bid_volume": {"min": 0, "max": 30000},
     "sum_ask_volume": {"min": 0, "max": 30000},
     "imbalance": {"min": -1, "max": 1}
