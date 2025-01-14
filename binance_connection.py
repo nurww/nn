@@ -185,7 +185,7 @@ async def continuous_data_fetch(symbol, intervals, year, force):
         async with aiohttp.ClientSession() as session:
             tasks = []
             for interval in intervals:
-                start_time = get_last_timestamp_from_db(connection, interval) or int(datetime(year, 9, 15).timestamp() * 1000)
+                start_time = get_last_timestamp_from_db(connection, interval) or int(datetime(year, 9, 1).timestamp() * 1000)
                 tasks.append(fetch_and_store_data_with_timing(session, connection, symbol, interval, start_time, force))
             await asyncio.gather(*tasks)
     finally:

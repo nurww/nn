@@ -53,19 +53,19 @@ async def save_to_redis(redis_client, data, key):
     except Exception as e:
         logging.error(f"Ошибка при сохранении в Redis: {e}")
 
-async def save_to_mysql(mysql_conn, data_list):
-    try:
-        cursor = mysql_conn.cursor()
-        query = """
-            INSERT INTO order_book_data (timestamp, mid_price, sum_bid_volume, sum_ask_volume, bid_ask_imbalance)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        cursor.executemany(query, data_list)
-        mysql_conn.commit()
-        cursor.close()
-        print(f"Записано {len(data_list)} записей в MySQL.")
-    except mysql.connector.Error as e:
-        logging.error(f"Ошибка при записи в MySQL: {e}")
+# async def save_to_mysql(mysql_conn, data_list):
+#     try:
+#         cursor = mysql_conn.cursor()
+#         query = """
+#             INSERT INTO order_book_data (timestamp, mid_price, sum_bid_volume, sum_ask_volume, bid_ask_imbalance)
+#             VALUES (%s, %s, %s, %s, %s)
+#         """
+#         cursor.executemany(query, data_list)
+#         mysql_conn.commit()
+#         cursor.close()
+#         print(f"Записано {len(data_list)} записей в MySQL.")
+#     except mysql.connector.Error as e:
+#         logging.error(f"Ошибка при записи в MySQL: {e}")
 
 # Функция для извлечения сигнала от модели интервалов из Redis
 async def get_interval_signal(redis_client):
@@ -85,15 +85,8 @@ async def process_message(data, redis_client, mysql_conn):
 
         timestamp = datetime.utcnow()
 
-        # Высокоточная средняя цена
-        mid_price = (bids[0, 0] + asks[0, 0]) / Decimal(2)
-
-        # Логирование для проверки
-        # logging.info(f"bids (high precision): {bids}")
-        # logging.info(f"asks (high precision): {asks}")
-        # logging.info(f"mid_price (high precision): {mid_price}")
-
         # Оставляем остальную логику неизменной
+        mid_price = (bids[0, 0] + asks[0, 0]) / Decimal(2)
         sum_bid_volume = np.sum([bid[1] for bid in bids])
         sum_ask_volume = np.sum([ask[1] for ask in asks])
         imbalance = (sum_bid_volume - sum_ask_volume) / (sum_bid_volume + sum_ask_volume) if (sum_bid_volume + sum_ask_volume) > 0 else Decimal(0)
@@ -106,43 +99,42 @@ async def process_message(data, redis_client, mysql_conn):
             "imbalance": min_max_normalize(float(imbalance), FIXED_BOUNDARIES["imbalance"]["min"], FIXED_BOUNDARIES["imbalance"]["max"])
         }
 
-
         # Сохраняем данные в Redis
         await save_to_redis(redis_client, normalized_data, "normalized_order_book_stream")
-        await save_to_redis(redis_client, normalized_data, "order_book_10min_cache")
+        # await save_to_redis(redis_client, normalized_data, "order_book_10min_cache")
 
-        # Замер времени перед началом обработки данных
-        start_time = time.time()
+        # # Замер времени перед началом обработки данных
+        # start_time = time.time()
 
-        # Проверяем, достигли ли 10 минут (примерно 6000 записей, если данные поступают 5 раз в 1 сек.)
-        cache_size = await redis_client.llen("order_book_10min_cache")
-        if cache_size >= 6000:  # 10 минут данных
-            # Извлекаем все данные из "order_book_10min_cache"
-            raw_data = await redis_client.lrange("order_book_10min_cache", 0, -1)
-            # Преобразуем их обратно в Python-объекты
-            data_list = [json.loads(record) for record in raw_data]
+        # # Проверяем, достигли ли 10 минут (примерно 6000 записей, если данные поступают 5 раз в 1 сек.)
+        # cache_size = await redis_client.llen("order_book_10min_cache")
+        # if cache_size >= 6000:  # 10 минут данных
+        #     # Извлекаем все данные из "order_book_10min_cache"
+        #     raw_data = await redis_client.lrange("order_book_10min_cache", 0, -1)
+        #     # Преобразуем их обратно в Python-объекты
+        #     data_list = [json.loads(record) for record in raw_data]
 
-            # Преобразуем для записи в MySQL
-            mysql_data = [
-                (
-                    datetime.strptime(record["timestamp"], '%Y-%m-%d %H:%M:%S.%f'),
-                    record["mid_price"],
-                    record["sum_bid_volume"],
-                    record["sum_ask_volume"],
-                    record["imbalance"]
-                )
-                for record in data_list
-            ]
+        #     # Преобразуем для записи в MySQL
+        #     mysql_data = [
+        #         (
+        #             datetime.strptime(record["timestamp"], '%Y-%m-%d %H:%M:%S.%f'),
+        #             record["mid_price"],
+        #             record["sum_bid_volume"],
+        #             record["sum_ask_volume"],
+        #             record["imbalance"]
+        #         )
+        #         for record in data_list
+        #     ]
 
-            # Сохраняем данные в MySQL
-            await save_to_mysql(mysql_conn, mysql_data)
+        #     # Сохраняем данные в MySQL
+        #     await save_to_mysql(mysql_conn, mysql_data)
 
-            # Очищаем кеш в Redis после записи
-            await redis_client.delete("order_book_10min_cache")
+        #     # Очищаем кеш в Redis после записи
+        #     await redis_client.delete("order_book_10min_cache")
 
-        # Замер времени после выполнения обработки
-        elapsed_time = time.time() - start_time
-        # logging.info(f"Время выполнения блока обработки: {elapsed_time:.4f} секунд.")
+        # # Замер времени после выполнения обработки
+        # elapsed_time = time.time() - start_time
+        # # logging.info(f"Время выполнения блока обработки: {elapsed_time:.4f} секунд.")
     
     except (json.JSONDecodeError, ValueError) as e:
         logging.error(f"Ошибка при обработке данных: {e}")

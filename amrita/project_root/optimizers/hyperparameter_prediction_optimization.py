@@ -60,7 +60,7 @@ class TradingEnvironment:
         self.start_balance = 0
         self.liquidation_price = 0
         self.initial_spot_balance=28
-        self.initialize_balances(trade_balance=70)
+        self.initialize_balances(trade_balance=200)
 
     def initialize_balances(self, trade_balance):
         """
@@ -1506,10 +1506,10 @@ def merge_large_and_small_data(data: pd.DataFrame, small_data: pd.DataFrame) -> 
 
     # Объединяем по времени
     merged_data = pd.merge(
-        data, 
-        small_data, 
-        left_on='open_time', 
-        right_on='small_open_time', 
+        data,
+        small_data,
+        left_on='open_time',
+        right_on='small_open_time',
         how='left'
     )
     
@@ -1792,7 +1792,7 @@ def objective(trial):
     target_update_frequency = 2  # Как часто обновлять целевую сеть
 
     for episode in range(episodes):
-        state = env.reset(trade_balance=70)
+        state = env.reset(trade_balance=200)
         total_reward = 0
 
         while True:

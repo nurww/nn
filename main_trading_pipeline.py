@@ -99,6 +99,10 @@ def main_process():
             if run_script('indicators_for_periods.py'):
                 if run_script('data_processor.py'):
                     logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
+                    # if run_script('generate_interval_predictions.py'):
+                    #     logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
+                    # else:
+                    #     logging.error(f"Ошибка при выполнении generate_interval_predictions.py за {next_execution_time}")
                 else:
                     logging.error(f"Ошибка при выполнении data_processor.py за {next_execution_time}")
             else:
