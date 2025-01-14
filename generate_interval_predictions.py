@@ -131,8 +131,20 @@ def aggregate_small_data(small_data: pd.DataFrame, interval: str) -> pd.DataFram
     aggregated['next_open_price'] = aggregated['open_price'].shift(-1)
     aggregated['next_close_price'] = aggregated['close_price'].shift(-1)
     aggregated['next_volume'] = aggregated['volume'].shift(-1)
-    # print(f"aggregate_small_data {len(aggregated)}")
-    # print(f"aggregate_small_data {aggregated.tail(3)}")
+    columns_to_display = [
+        "open_time", "next_open_time",
+        "open_price_normalized", "next_open_price",
+        "close_time", "next_close_time"
+    ]
+    # if all(col in aggregated.columns for col in columns_to_display):  # Проверяем наличие столбцов
+    #     pd.set_option('display.max_rows', None)  # Показывать все строки
+    #     pd.set_option('display.max_columns', None)  # Показывать все столбцы
+    #     pd.set_option('display.expand_frame_repr', False)  # Не переносить DataFrame на несколько строк
+    #     pd.set_option('display.max_colwidth', None)  # Показывать полные значения в ячейках
+    #     print("Merged data preview (selected columns):")
+    #     print(f"aggregate_small_data {len(aggregated)}")
+    #     print(f"aggregate_small_data {aggregated[columns_to_display]}")
+    
     # print(f"aggregate_small_data {aggregated.head(3)}")
 
     # Сбрасываем индекс и переименовываем его
@@ -214,11 +226,16 @@ def merge_large_and_small_data(data: pd.DataFrame, small_data: pd.DataFrame) -> 
         "open_price_normalized", "next_open_price",
         "close_time", "next_close_time"
     ]
-    if all(col in merged_data.columns for col in columns_to_display):  # Проверяем наличие столбцов
-        print("Merged data preview (selected columns):")
-        print(merged_data[columns_to_display].tail(5))
-    else:
-        logging.warning("Some selected columns are missing in merged data.")
+    # if all(col in merged_data.columns for col in columns_to_display):  # Проверяем наличие столбцов
+    #     pd.set_option('display.max_rows', None)  # Показывать все строки
+    #     pd.set_option('display.max_columns', None)  # Показывать все столбцы
+    #     pd.set_option('display.expand_frame_repr', False)  # Не переносить DataFrame на несколько строк
+    #     pd.set_option('display.max_colwidth', None)  # Показывать полные значения в ячейках
+    #     print("Merged data preview (selected columns):")
+    #     # print(merged_data[columns_to_display].head(5))
+    #     print(merged_data[columns_to_display])
+    # else:
+    #     logging.warning("Some selected columns are missing in merged data.")
     print("end ______________________")
     logging.info(f"Merged data shape: {merged_data.shape}")
     return merged_data
@@ -256,12 +273,6 @@ def get_small_interval(interval):
     return interval_map[interval]
 
 def fetch_interval_data(interval: str, sequence_length: int) -> pd.DataFrame:
-    # query = f"""
-    #     SELECT * FROM binance_klines_normalized
-    #     WHERE data_interval = '{interval}' and open_time <= '2025-01-14 05:59:00'
-    #     ORDER BY open_time DESC
-    #     LIMIT {sequence_length}
-    # """
     query = f"""
         SELECT * FROM binance_klines_normalized
         WHERE data_interval = '{interval}'
@@ -275,9 +286,6 @@ def fetch_interval_data(interval: str, sequence_length: int) -> pd.DataFrame:
 
 def fetch_small_interval_data(interval: str, required_rows) -> pd.DataFrame:
     logging.info(f"Fetching small interval data for {interval}")
-    # query = f"""SELECT open_time, open_price, high_price, low_price, close_price, close_time, volume
-    #           FROM binance_klines WHERE `data_interval` = '{interval}' and open_time <= '2025-01-14 06:00:00'
-    #           order by open_time desc LIMIT {required_rows}"""
     query = f"""SELECT open_time, open_price, high_price, low_price, close_price, close_time, volume
               FROM binance_klines WHERE `data_interval` = '{interval}'
               order by open_time desc LIMIT {required_rows}"""
