@@ -40,14 +40,17 @@ def format_and_print_data(data):
 
 # Получение данных с Binance
 async def get_binance_data(session, symbol, interval, start_time, limit=1000):
+    # current_time = datetime.now(timezone.utc)
     current_time = datetime.utcnow()
     next_execution_time = current_time.replace(second=5, microsecond=0)
-    if current_time.second >= 5:
+    if current_time.second > 5:
         next_execution_time += timedelta(minutes=0)
 
+    # time_to_wait = (next_execution_time - datetime.now(timezone.utc)).total_seconds()
     time_to_wait = (next_execution_time - datetime.utcnow()).total_seconds()
     print(f"Ждем до 5-й секунды: {next_execution_time} (ожидание {time_to_wait:.2f} секунд)")
     await asyncio.sleep(time_to_wait)
+    # print(f"- {interval} запрос на Binance в {datetime.now(timezone.utc)}")
     print(f"- {interval} запрос на Binance в {datetime.utcnow()}")
 
     # Определяем endTime для завершенного интервала
@@ -94,6 +97,7 @@ def is_time_to_fetch(interval, force):
         print(f"Принудительная загрузка данных для {interval}.")
         return True
     
+    # now = datetime.now(timezone.utc)
     now = datetime.utcnow()
 
     if interval == '1d' and not (now.minute % 15 == 0 and now.second >= 5 and now.microsecond >= 0):
@@ -158,7 +162,7 @@ def get_last_timestamp_from_db(connection, data_interval):
 
 # Постоянная загрузка данных с проверкой допустимого времени
 async def fetch_and_store_data_with_timing(session, connection, symbol, interval, start_time, force):
-    if is_time_to_fetch(interval, force):
+    # if is_time_to_fetch(interval, force):
         while True:
             data = await get_binance_data(session, symbol, interval, start_time)
             
@@ -173,8 +177,8 @@ async def fetch_and_store_data_with_timing(session, connection, symbol, interval
 
             if len(data) < 1000:
                 break
-    else:
-        print(f"Пропускаем загрузку для интервала {interval}, время еще не наступило.")
+    # else:
+    #     print(f"Пропускаем загрузку для интервала {interval}, время еще не наступило.")
 
 # Постоянная загрузка данных
 async def continuous_data_fetch(symbol, intervals, year, force):

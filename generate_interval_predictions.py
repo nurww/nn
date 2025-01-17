@@ -4,7 +4,7 @@ import sys
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import torch
 import numpy as np
 import redis.asyncio as aioredis
@@ -24,7 +24,7 @@ REDIS_CONFIG = {'host': 'localhost', 'port': 6379, 'db': 0}
 
 # Настройка логирования
 logging.basicConfig(
-    filename='amrita/project_root/logs/interval_predictions.log',
+    filename='amrita/project_root/logs/interval_generate_predictions.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     encoding='utf-8'
@@ -131,11 +131,11 @@ def aggregate_small_data(small_data: pd.DataFrame, interval: str) -> pd.DataFram
     aggregated['next_open_price'] = aggregated['open_price'].shift(-1)
     aggregated['next_close_price'] = aggregated['close_price'].shift(-1)
     aggregated['next_volume'] = aggregated['volume'].shift(-1)
-    columns_to_display = [
-        "open_time", "next_open_time",
-        "open_price_normalized", "next_open_price",
-        "close_time", "next_close_time"
-    ]
+    # columns_to_display = [
+    #     "open_time", "next_open_time",
+    #     "open_price_normalized", "next_open_price",
+    #     "close_time", "next_close_time"
+    # ]
     # if all(col in aggregated.columns for col in columns_to_display):  # Проверяем наличие столбцов
     #     pd.set_option('display.max_rows', None)  # Показывать все строки
     #     pd.set_option('display.max_columns', None)  # Показывать все столбцы
@@ -145,7 +145,7 @@ def aggregate_small_data(small_data: pd.DataFrame, interval: str) -> pd.DataFram
     #     print(f"aggregate_small_data {len(aggregated)}")
     #     print(f"aggregate_small_data {aggregated[columns_to_display]}")
     
-    # print(f"aggregate_small_data {aggregated.head(3)}")
+    # print(f"aggregate_small_data {aggregated}")
 
     # Сбрасываем индекс и переименовываем его
     aggregated.reset_index(drop=True, inplace=True)
@@ -196,36 +196,36 @@ def merge_large_and_small_data(data: pd.DataFrame, small_data: pd.DataFrame) -> 
     }, inplace=True)
 
     # Объединяем по времени
-    merged_data = pd.merge(
-        data, 
-        small_data, 
-        left_on='open_time', 
-        right_on='small_open_time', 
-        how='left'
-    )
-    # merged_data = pd.merge_asof(
-    #     data.sort_values('open_time'),
-    #     small_data.sort_values('small_open_time'),
-    #     left_on='open_time',
-    #     right_on='small_open_time',
-    #     direction='backward'
+    # merged_data = pd.merge(
+    #     data, 
+    #     small_data, 
+    #     left_on='open_time', 
+    #     right_on='small_open_time', 
+    #     how='left'
     # )
+    merged_data = pd.merge_asof(
+        data.sort_values('open_time'),
+        small_data.sort_values('small_open_time'),
+        left_on='open_time',
+        right_on='small_open_time',
+        direction='backward'
+    )
     
-    print("start ______________________")
-    # Перед объединением
-    print("Large interval data range:", data["open_time"].min(), "-", data["open_time"].max())
-    print("Small interval data range:", small_data["small_open_time"].min(), "-", small_data["small_open_time"].max())
+    # print("start ______________________")
+    # # Перед объединением
+    # print("Large interval data range:", data["open_time"].min(), "-", data["open_time"].max())
+    # print("Small interval data range:", small_data["small_open_time"].min(), "-", small_data["small_open_time"].max())
 
     # После объединения
     # print("Merged data preview (all columns):")
     # print(merged_data.tail(5))
 
-    # Отображаем только определенные столбцы
-    columns_to_display = [
-        "open_time", "next_open_time",
-        "open_price_normalized", "next_open_price",
-        "close_time", "next_close_time"
-    ]
+    # # Отображаем только определенные столбцы
+    # columns_to_display = [
+    #     "open_time", "next_open_time",
+    #     "open_price_normalized", "next_open_price",
+    #     "close_time", "next_close_time"
+    # ]
     # if all(col in merged_data.columns for col in columns_to_display):  # Проверяем наличие столбцов
     #     pd.set_option('display.max_rows', None)  # Показывать все строки
     #     pd.set_option('display.max_columns', None)  # Показывать все столбцы
@@ -236,7 +236,6 @@ def merge_large_and_small_data(data: pd.DataFrame, small_data: pd.DataFrame) -> 
     #     print(merged_data[columns_to_display])
     # else:
     #     logging.warning("Some selected columns are missing in merged data.")
-    print("end ______________________")
     logging.info(f"Merged data shape: {merged_data.shape}")
     return merged_data
 
@@ -261,6 +260,7 @@ def calculate_required_rows_for_small_interval(sequence_length: int, large_inter
     return required_rows
 
 def get_small_interval(interval):
+
     interval_map = {
         "1d": "4h",
         "4h": "1h",
@@ -389,31 +389,27 @@ async def get_intervals_predictions() -> pd.DataFrame:
     all_predictions = []
 
     # Настройка расписания с временными окнами
-    # schedule = {
-    #     "1d": lambda now: now.hour % 4 == 0 and now.minute == 0 and now.second >= 0,    # Каждые 4 часа в начале часа
-    #     "4h": lambda now: now.minute == 0 and now.second >= 0,                          # Каждый час в начале часа
-    #     "1h": lambda now: now.minute % 15 == 0 and now.second >= 0,                     # Каждые 15 минут
-    #     "15m": lambda now: now.minute % 5 == 0 and now.second >= 0,                     # Каждые 5 минут
-    #     "5m": lambda now: now.second >= 0,                                              # Каждую минуту
-    #     "1m": lambda now: now.second >= 0                                               # Каждую минуту
-    # }
+    schedule = {
+        "1d": lambda now: (now.minute % 5 == 1) and now.second >= 0,    # Каждые 4 часа в начале часа
+        "4h": lambda now: (now.minute % 5 == 1) and now.second >= 0,                          # Каждый час в начале часа
+        "1h": lambda now: (now.minute % 5 == 1) and now.second >= 0,                     # Каждые 15 минут
+        "15m": lambda now: (now.minute % 5 == 1) and now.second >= 0,                     # Каждые 5 минут
+        "5m": lambda now: now.second >= 0,                                              # Каждую минуту
+        "1m": lambda now: now.second >= 0                                               # Каждую минуту
+    }
 
     redis_client = await initialize_redis()
 
     for interval in intervals:
-        print(f"Interval: {interval}")
+        # print(f"Interval: {interval}")
+        # now = datetime.now(timezone.utc)
         now = datetime.utcnow()
 
         # # Проверяем, следует ли запускать прогнозы для текущего интервала
-        # if interval in schedule and not schedule[interval](now):
-        #     logging.info(f"Пропускаем прогнозы для интервала {interval} (не время для выполнения).")
-        #     print(f"Пропускаем прогнозы для интервала {interval} (не время для выполнения).")
-        #     continue
-
-        # Загружаем модель
-
-        # if interval != '15m':
-        #     continue
+        if interval in schedule and not schedule[interval](now):
+            logging.info(f"Пропускаем прогнозы для интервала {interval} (не время для выполнения).")
+            print(f"Пропускаем прогнозы для интервала {interval} (не время для выполнения).")
+            continue
 
         params = optimized_params[interval]
         sequence_length = params["sequence_length"]
@@ -513,7 +509,7 @@ async def read_predictions_from_redis(redis_client, interval: str):
             # Преобразуем JSON-строки в DataFrame
             data = [json.loads(prediction) for prediction in predictions]
             df = pd.DataFrame(data)
-            print(f"Прогнозы для {interval}:\n{df}")
+            print(f"Прогнозы для {interval}:\n{df['prediction']}")
             logging.info(f"Прогнозы для {interval} успешно считаны из Redis.")
         else:
             print(f"Нет данных для {interval} в Redis.")

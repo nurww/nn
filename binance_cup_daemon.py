@@ -4,7 +4,7 @@ import asyncio
 import websockets
 import json
 import mysql.connector
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Буфер для хранения данных за последние 10 секунд
 buffer = []
@@ -75,7 +75,7 @@ async def analyze_order_book():
                 sum_ask_volume = sum(float(ask[1]) for ask in asks[:5])
 
                 # Время записи в формате UTC
-                timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
                 # Добавляем данные в буфер
                 buffer.append((timestamp, weighted_mid_price, sum_bid_volume, sum_ask_volume, imbalance))

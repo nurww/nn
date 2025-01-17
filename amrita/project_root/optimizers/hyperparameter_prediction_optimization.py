@@ -184,7 +184,7 @@ class TradingEnvironment:
         if best_pnl > actual_pnl:
             reward = best_pnl - actual_pnl
             # logging.info(f"retrospective_analysis() 'if best_pnl > actual_pnl' - reward: {reward}, best_pnl: {best_pnl}, actual_pnl: {actual_pnl}")
-            state = self._get_state()
+            state = self._get_state(force_last_state=True)
             action = [2, []]
             # logging.info(f"Retrospective analysis: Missed opportunity to close at {best_exit_price:.5f}, "
             #             f"Best PnL: {best_pnl:.5f}, Actual PnL: {actual_pnl:.5f}")
@@ -200,7 +200,7 @@ class TradingEnvironment:
             retrospective_experience = self.retrospective_analysis(position, future_data)
             if retrospective_experience:
                 state, action, reward = retrospective_experience
-                self.agent.store_experience(state, action, reward, self._get_state(), False)
+                self.agent.store_experience(state, action, reward, self._get_state(force_last_state=True), False)
         self.positions = []  # Очищаем активные позиции
 
     def analyze_trends(self):
@@ -225,7 +225,7 @@ class TradingEnvironment:
         """
         # Анализ текущей цены
         current_price = denormalize(self.current_price)
-        model_output = self.agent.predict(self._get_state())
+        model_output = self.agent.predict(self._get_state(force_last_state=True))
         _, predicted_stop_loss, predicted_take_profit = model_output
 
         # Получение рыночных границ
@@ -442,7 +442,7 @@ class TradingEnvironment:
         if self.current_step >= len(self.X):
             # logging.warning("Current step exceeds data length. Ending the episode.")
             self._close_positions()
-            self.train_on_experience()
+            # self.train_on_experience()
             return self._get_state(), 0, True  # Завершаем эпизод
 
         # Обновление текущей цены
@@ -505,7 +505,7 @@ class TradingEnvironment:
         # Переход на следующий шаг
         self.current_step += 1
         
-        return self._get_state(), reward, done
+        return self._get_state(force_last_state=True), reward, done
 
     def _open_position(self, direction):
         # Проверка наличия активных позиций
@@ -525,14 +525,16 @@ class TradingEnvironment:
             return
         
         # Предсказания от агента
-        _, predicted_stop_loss, predicted_take_profit = self.agent.predict(self._get_state())
+        _, predicted_stop_loss, predicted_take_profit = self.agent.predict(self._get_state(force_last_state=True))
         predicted_stop_loss = float(predicted_stop_loss)
         predicted_take_profit = float(predicted_take_profit)
+        # logging.info(f"_open_position - stop loss: {predicted_stop_loss}, take profit: {predicted_take_profit}")
+        # logging.info(f"_open_position - stop loss: {denormalize(predicted_stop_loss)}, take profit: {denormalize(predicted_take_profit)}")
 
         stop_loss = mid_price * (1 - predicted_stop_loss)  # Преобразуем из нормализованных значений
         take_profit = mid_price * (1 + predicted_take_profit)
         
-        self.liquidation_price = self._calculate_liquidation_price(total_position_size, direction)
+        self.liquidation_price = self._calculate_liquidation_price(total_position_size, mid_price, direction)
         self.futures_balance -= position_size / mid_price
 
         position_id = len(self.positions) + 1
@@ -621,7 +623,7 @@ class TradingEnvironment:
                 if retrospective_experience:
                     state, action, reward = retrospective_experience
                     # logging.info(f"_close_positions() 'if retrospective_experience' - reward: {reward}")
-                    self.agent.store_experience(state, action, reward, self._get_state(), False)
+                    self.agent.store_experience(state, action, reward, self._get_state(force_last_state=True), False)
             except Exception as e:
                 errors.append((i, str(e)))
                 logging.error(f"Error closing position {i}: {e}")
@@ -642,7 +644,7 @@ class TradingEnvironment:
                     "commission": commission,
                     "exit_spot_balance": self.spot_balance,
                     "exit_futures_balance": self.futures_balance,
-                    "entry_data": self._get_state()
+                    "entry_data": self._get_state(force_last_state=True)
                 })
                 # logging.info(f"_close_positions Trade log entry: {self.trade_log}")
 
@@ -653,7 +655,7 @@ class TradingEnvironment:
 
         # Передача total_reward агенту
         if total_reward != 0:
-            state = self._get_state()  # Получаем текущее состояние
+            state = self._get_state(force_last_state=True)  # Получаем текущее состояние
             # logging.info(f"_close_positions() 'if total_reward != 0:' - total_reward: {total_reward}")
             self.agent.store_experience(state, [3, []], total_reward, state, True)  # Используем фиктивное действие [3, []]
         
@@ -753,33 +755,40 @@ class TradingEnvironment:
                         f"Spot balance: {self.spot_balance:.5f}, Futures balance: {self.futures_balance:.5f}")
         return transfer_amount
 
-    def _calculate_liquidation_price(self, position_size, direction):
+    def _calculate_liquidation_price(self, position_size, entry_price, direction, maintenance_margin_rate=0.05):
         """
-        Рассчитывает уровень ликвидации для лонга и шорта.
+        Рассчитывает цену ликвидации для лонг или шорт позиции с учетом корректировки среднего отклонения.
         
         :param entry_price: float, цена входа
-        :param position_size: float, размер позиции в долларах
         :param leverage: int, плечо
-        :param futures_balance: float, текущий баланс фьючерсного кошелька
-        :param maintenance_margin_rate: float, минимальная маржа (например, 0.005 для 0.5%)
+        :param balance: float, баланс фьючерсного кошелька
+        :param position_size: float, размер позиции (в USDT)
         :param direction: str, направление сделки ("long" или "short")
-        :return: float, уровень ликвидации
+        :param maintenance_margin_rate: float, ставка маржи (по умолчанию 0.05)
+        :return: float, скорректированная цена ликвидации
         """
-        entry_price = denormalize(self.current_price)
-        maintenance_margin_rate = 0.00255
-        # Рассчитываем техническую маржу
+        # Средний процент отклонения для long и short
+        correction_factor = 0.0039  # 0.39%
+
+        # Рассчитываем количество контрактов (Quantity)
+        # quantity = (position_size * self.leverage) / entry_price
+
+        # Рассчитываем Maintenance Margin
         maintenance_margin = position_size * maintenance_margin_rate
 
-        # Рассчитываем уровень ликвидации
+        # Рассчитываем цену ликвидации
         if direction == "long":
-            self.liquidation_price = entry_price - (self.futures_balance - maintenance_margin) / position_size
+            liquidation_price = entry_price - ((self.futures_balance - maintenance_margin) / position_size)
+            # Корректировка для long
+            liquidation_price *= (1 + correction_factor)
         elif direction == "short":
-            self.liquidation_price = entry_price + (self.futures_balance - maintenance_margin) / position_size
+            liquidation_price = entry_price + ((self.futures_balance - maintenance_margin) / position_size)
+            # Корректировка для short
+            liquidation_price *= (1 - correction_factor)
         else:
             raise ValueError("Direction must be 'long' or 'short'")
-        
-        # logging.info(f"_calculate_liquidation_price() - liquidation_price: {self.liquidation_price}, position_size: {position_size}")
-        return round(self.liquidation_price, 5)  # Округляем до 5 знаков
+
+        return round(liquidation_price, 5)
 
     def _calculate_pnl(self, position):
         """

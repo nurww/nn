@@ -6,7 +6,7 @@ import json
 import redis
 import mysql.connector
 from mysql.connector import pooling, Error
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 # Настройка логирования
@@ -71,7 +71,7 @@ async def analyze_order_book():
                     imbalance = (sum_bid_volume - sum_ask_volume) / (sum_bid_volume + sum_ask_volume)
 
                     # Текущее время
-                    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
                     # Добавление в Redis и сохранение в буфер
                     redis_client.rpush("order_book_stream", json.dumps({

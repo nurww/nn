@@ -6,7 +6,7 @@ import json
 import redis.asyncio as aioredis
 import numpy as np
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time  # Добавьте импорт модуля time
 from decimal import Decimal
 import pandas as pd
@@ -266,7 +266,7 @@ async def process_order_book_and_store(data, redis_client):
         bids = np.array([[Decimal(bid[0]), Decimal(bid[1])] for bid in bids], dtype=object)
         asks = np.array([[Decimal(ask[0]), Decimal(ask[1])] for ask in asks], dtype=object)
 
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now(timezone.utc)
 
         # Основные показатели стакана
         mid_price = (bids[0, 0] + asks[0, 0]) / Decimal(2)
@@ -301,7 +301,7 @@ async def fetch_order_book_data(redis_client):
 
     # while True:
     while not shutdown_flag.is_set():
-        connection_start_time = datetime.utcnow()  # Время начала соединения
+        connection_start_time = datetime.now(timezone.utc)  # Время начала соединения
 
         try:
             async with websockets.connect(DEPTH_URL) as websocket:
@@ -314,10 +314,10 @@ async def fetch_order_book_data(redis_client):
                         break
 
                     # Проверяем, прошло ли 20 минут
-                    if datetime.utcnow() - connection_start_time >= timedelta(minutes=20):
+                    if connection_start_time - connection_start_time >= timedelta(minutes=20):
                         logging.info("Переключение на новый Redis клиент через 20 минут.")
 
-                        total_runtime = datetime.utcnow() - connection_start_time
+                        total_runtime = connection_start_time - connection_start_time
                         logging.info(f"Redis клиент работал {total_runtime}. Переключаемся на новый.")
 
                         # Создаем новый redis_client
@@ -325,13 +325,13 @@ async def fetch_order_book_data(redis_client):
 
                         # Закрываем старый redis_client
                         try:
-                            await redis_client.close()
+                            await redis_client.aclose()
                         except Exception as e:
                             logging.error(f"Ошибка при закрытии старого Redis клиента: {e}")
 
                         # Переключаемся на новый redis_client
                         redis_client = next_redis_client
-                        connection_start_time = datetime.utcnow()  # Перезапускаем таймер соединения
+                        connection_start_time = datetime.now(timezone.utc)  # Перезапускаем таймер соединения
                         logging.info("Переключение на новый Redis клиент завершено.")
                         break  # Переподключение к WebSocket
 
@@ -357,7 +357,7 @@ async def main():
         await fetch_order_book_data(redis_client)
     finally:
         logging.info("Завершаем соединение с Redis...")
-        await redis_client.close()
+        await redis_client.aclose()
         
 
 if __name__ == "__main__":

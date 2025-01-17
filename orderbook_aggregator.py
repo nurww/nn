@@ -1,6 +1,6 @@
 import mysql.connector
 from mysql.connector import pooling
-from datetime import datetime
+from datetime import datetime, timezone
 import redis
 import json
 import time
@@ -68,7 +68,7 @@ def aggregate_and_save_to_mysql():
     for (price, side), data in aggregated_data.items():
         avg_volume = data["total_volume"] / data["count"]
         activity_indicator = data["count"] / len(order_book_data)
-        last_update = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        last_update = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         mysql_data.append((price, data["total_volume"], side, avg_volume, activity_indicator, last_update, imbalance))
 
     # Запись в MySQL

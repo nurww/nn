@@ -1164,77 +1164,75 @@
 
 
 
-import logging
+# import logging
 
-class BalanceManager:
-    def __init__(self, spot_balance, futures_balance, growth_factor=1.75):
-        self.spot_balance = spot_balance
-        self.futures_balance = futures_balance
-        self.growth_factor = growth_factor
-        self.current_target = self.spot_balance + self.futures_balance  # Initial total balance
+# class BalanceManager:
+#     def __init__(self, spot_balance, futures_balance, growth_factor=1.75):
+#         self.spot_balance = spot_balance
+#         self.futures_balance = futures_balance
+#         self.growth_factor = growth_factor
+#         self.current_target = self.spot_balance + self.futures_balance  # Initial total balance
 
-    def redistribute_balance(self):
-        """
-        Redistributes the balance when the total balance exceeds the target.
-        """
-        total_balance = self.spot_balance + self.futures_balance
+#     def redistribute_balance(self):
+#         """
+#         Redistributes the balance when the total balance exceeds the target.
+#         """
+#         total_balance = self.spot_balance + self.futures_balance
 
-        if total_balance >= self.current_target * self.growth_factor:
-            # Update the target total balance
-            self.current_target = total_balance
-            # Increase the spot balance by growth factor
-            new_spot_balance = self.spot_balance * self.growth_factor
-            # Calculate the new futures balance to maintain the total balance
-            new_futures_balance = self.current_target - new_spot_balance
+#         if total_balance >= self.current_target * self.growth_factor:
+#             # Update the target total balance
+#             self.current_target = total_balance
+#             # Increase the spot balance by growth factor
+#             new_spot_balance = self.spot_balance * self.growth_factor
+#             # Calculate the new futures balance to maintain the total balance
+#             new_futures_balance = self.current_target - new_spot_balance
 
-            # Update balances
-            self.spot_balance = new_spot_balance
-            self.futures_balance = new_futures_balance
+#             # Update balances
+#             self.spot_balance = new_spot_balance
+#             self.futures_balance = new_futures_balance
 
-            logging.info(
-                f"Redistribution: Spot: {self.spot_balance:.2f}, "
-                f"Futures: {self.futures_balance:.2f}, Total: {self.current_target:.2f}"
-            )
-        else:
-            logging.info(
-                f"No redistribution. Spot: {self.spot_balance:.2f}, "
-                f"Futures: {self.futures_balance:.2f}, Total: {total_balance:.2f}"
-            )
+#             logging.info(
+#                 f"Redistribution: Spot: {self.spot_balance:.2f}, "
+#                 f"Futures: {self.futures_balance:.2f}, Total: {self.current_target:.2f}"
+#             )
+#         else:
+#             logging.info(
+#                 f"No redistribution. Spot: {self.spot_balance:.2f}, "
+#                 f"Futures: {self.futures_balance:.2f}, Total: {total_balance:.2f}"
+#             )
 
-    def increment_futures(self, increment):
-        """
-        Increases the futures balance by a given increment.
-        """
-        self.futures_balance += increment
+#     def increment_futures(self, increment):
+#         """
+#         Increases the futures balance by a given increment.
+#         """
+#         self.futures_balance += increment
 
-def simulate_changes(manager, steps, increment):
-    """
-    Simulates balance changes over a number of steps.
-    """
-    logging.info("Starting simulation...")
-    for step in range(1, steps + 1):
-        logging.info(f"Step {step}:")
-        manager.increment_futures(increment)
-        manager.redistribute_balance()
-        logging.info(
-            f"After change: Spot: {manager.spot_balance:.2f}, "
-            f"Futures: {manager.futures_balance:.2f}, "
-            f"Total: {manager.spot_balance + manager.futures_balance:.2f}"
-        )
-
-
-# Logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# Initialize manager with initial values
-initial_spot = 28.0
-initial_futures = 42.0
-manager = BalanceManager(initial_spot, initial_futures)
-
-# Run simulation
-simulate_changes(manager, steps=100, increment=13)
+# def simulate_changes(manager, steps, increment):
+#     """
+#     Simulates balance changes over a number of steps.
+#     """
+#     logging.info("Starting simulation...")
+#     for step in range(1, steps + 1):
+#         logging.info(f"Step {step}:")
+#         manager.increment_futures(increment)
+#         manager.redistribute_balance()
+#         logging.info(
+#             f"After change: Spot: {manager.spot_balance:.2f}, "
+#             f"Futures: {manager.futures_balance:.2f}, "
+#             f"Total: {manager.spot_balance + manager.futures_balance:.2f}"
+#         )
 
 
+# # Logging setup
+# logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# # Initialize manager with initial values
+# initial_spot = 28.0
+# initial_futures = 42.0
+# manager = BalanceManager(initial_spot, initial_futures)
+
+# # Run simulation
+# simulate_changes(manager, steps=100, increment=13)
 
 
 
@@ -1242,23 +1240,141 @@ simulate_changes(manager, steps=100, increment=13)
 
 
 
-def denormalize(value):
-    """
-    Денормализует значение на основе диапазона.
-    """
-    min_value = 0
-    max_value = 115000
-    return value * (max_value - min_value) + min_value
 
-print(denormalize(0.808364))
-print(denormalize(0.828695))
+
+# def denormalize(value):
+#     """
+#     Денормализует значение на основе диапазона.
+#     """
+#     min_value = 0
+#     max_value = 115000
+#     return value * (max_value - min_value) + min_value
+
+# print(denormalize(0.808364))
+# print(denormalize(0.828695))
 
 	
-print(denormalize(0.79574))
-print(denormalize(0.823198))
+# print(denormalize(0.79574))
+# print(denormalize(0.823198))
 
 
 
 
 
 
+# Re-defining the liquidation price calculation function and reprocessing the examples
+import pandas as pd
+
+# def calculate_liquidation_price(entry_price, leverage, balance, position_size, direction, maintenance_margin_rate=0.05):
+#     """
+#     Рассчитывает цену ликвидации для лонг или шорт позиции.
+    
+#     :param entry_price: float, цена входа
+#     :param leverage: int, плечо
+#     :param balance: float, баланс фьючерсного кошелька
+#     :param position_size: float, размер позиции (в USDT)
+#     :param direction: str, направление сделки ("long" или "short")
+#     :param maintenance_margin_rate: float, ставка маржи (по умолчанию 0.05)
+#     :return: float, рассчитанная цена ликвидации
+#     """
+#     # Рассчитываем количество контрактов (Quantity)
+#     quantity = (position_size * leverage) / entry_price
+
+#     # Рассчитываем Maintenance Margin
+#     maintenance_margin = quantity * maintenance_margin_rate
+
+#     # Рассчитываем цену ликвидации
+#     if direction == "long":
+#         liquidation_price = entry_price - ((balance - maintenance_margin) / quantity)
+#     elif direction == "short":
+#         liquidation_price = entry_price + ((balance - maintenance_margin) / quantity)
+#     else:
+#         raise ValueError("Direction must be 'long' or 'short'")
+
+#     return round(liquidation_price, 2)
+
+def calculate_liquidation_price(self, position_size, entry_price, direction, maintenance_margin_rate=0.05):
+    """
+    Рассчитывает цену ликвидации для лонг или шорт позиции с учетом корректировки среднего отклонения.
+    
+    :param entry_price: float, цена входа
+    :param leverage: int, плечо
+    :param balance: float, баланс фьючерсного кошелька
+    :param position_size: float, размер позиции (в USDT)
+    :param direction: str, направление сделки ("long" или "short")
+    :param maintenance_margin_rate: float, ставка маржи (по умолчанию 0.05)
+    :return: float, скорректированная цена ликвидации
+    """
+    # Средний процент отклонения для long и short
+    correction_factor = 0.0039  # 0.39%
+
+    # Рассчитываем количество контрактов (Quantity)
+    quantity = (position_size * self.leverage) / entry_price
+
+    # Рассчитываем Maintenance Margin
+    maintenance_margin = quantity * maintenance_margin_rate
+
+    # Рассчитываем цену ликвидации
+    if direction == "long":
+        liquidation_price = entry_price - ((self.futures_balance - maintenance_margin) / quantity)
+        # Корректировка для long
+        liquidation_price *= (1 + correction_factor)
+    elif direction == "short":
+        liquidation_price = entry_price + ((self.futures_balance - maintenance_margin) / quantity)
+        # Корректировка для short
+        liquidation_price *= (1 - correction_factor)
+    else:
+        raise ValueError("Direction must be 'long' or 'short'")
+
+    return round(liquidation_price, 2)
+
+# Примеры для расчета Long
+examples = [
+    {"entry_price": 20000, "leverage": 125, "balance": 50, "position_size": 10, "direction": "long"},
+    {"entry_price": 25000, "leverage": 125, "balance": 250, "position_size": 20, "direction": "long"},
+    {"entry_price": 95000, "leverage": 125, "balance": 430, "position_size": 70, "direction": "long"},
+    {"entry_price": 80000, "leverage": 125, "balance": 988, "position_size": 78, "direction": "long"},
+    {"entry_price": 43211, "leverage": 125, "balance": 1718, "position_size": 14, "direction": "long"},
+    {"entry_price": 98741, "leverage": 100, "balance": 12781, "position_size": 1890, "direction": "long"}
+]
+
+# Расчет цен ликвидации
+results = []
+for example in examples:
+    liquidation_price = calculate_liquidation_price(
+        example["entry_price"],
+        example["leverage"],
+        example["balance"],
+        example["position_size"],
+        example["direction"]
+    )
+    print(f"Example: {example}, Liquidation Price: {liquidation_price}")
+    results.append({"Example": example, "Liquidation Price": liquidation_price})
+
+# Создание таблицы результатов
+# df_results = pd.DataFrame(results)
+# print(results)
+print(f"\n")
+
+# Примеры для расчета
+examples = [
+    {"entry_price": 20000, "leverage": 125, "balance": 50, "position_size": 10, "direction": "short"},
+    {"entry_price": 25000, "leverage": 125, "balance": 250, "position_size": 20, "direction": "short"},
+    {"entry_price": 95000, "leverage": 125, "balance": 430, "position_size": 70, "direction": "short"},
+    {"entry_price": 80000, "leverage": 125, "balance": 988, "position_size": 78, "direction": "short"},
+    {"entry_price": 43211, "leverage": 125, "balance": 1718, "position_size": 14, "direction": "short"},
+    {"entry_price": 98741, "leverage": 100, "balance": 12781, "position_size": 1890, "direction": "short"}
+]
+
+# Расчет цен ликвидации Short
+results = []
+for example in examples:
+    liquidation_price = calculate_liquidation_price(
+        example["entry_price"],
+        example["leverage"],
+        example["balance"],
+        example["position_size"],
+        example["direction"]
+    )
+    print(f"Example: {example}, Liquidation Price: {liquidation_price}")
+    results.append({"Example": example, "Liquidation Price": liquidation_price})

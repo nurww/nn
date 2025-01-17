@@ -3,7 +3,7 @@
 import logging
 import time
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 
 # Настройка логирования
@@ -79,11 +79,12 @@ def main_process():
     threading.Thread(target=stop_on_user_input, daemon=True).start()
 
     while not should_stop:
+        # current_time = datetime.now(timezone.utc)
         current_time = datetime.utcnow()
         
         # Рассчитываем момент 4-й секунды текущей или следующей минуты
-        next_execution_time = current_time.replace(second=4, microsecond=0)
-        if current_time.second >= 4:
+        next_execution_time = datetime.utcnow().replace(second=4, microsecond=0)
+        if datetime.utcnow().second >= 4:
             next_execution_time += timedelta(minutes=1)
         
         time_to_wait = (next_execution_time - datetime.utcnow()).total_seconds()
@@ -98,11 +99,11 @@ def main_process():
         if run_script('binance_connection.py'):
             if run_script('indicators_for_periods.py'):
                 if run_script('data_processor.py'):
-                    logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
-                    # if run_script('generate_interval_predictions.py'):
-                    #     logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
-                    # else:
-                    #     logging.error(f"Ошибка при выполнении generate_interval_predictions.py за {next_execution_time}")
+                    # logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
+                    if run_script('generate_interval_predictions.py'):
+                        logging.info(f"Цикл обработки данных за {next_execution_time} завершен успешно.")
+                    else:
+                        logging.error(f"Ошибка при выполнении generate_interval_predictions.py за {next_execution_time}")
                 else:
                     logging.error(f"Ошибка при выполнении data_processor.py за {next_execution_time}")
             else:

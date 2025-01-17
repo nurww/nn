@@ -3,7 +3,7 @@ import json
 import redis
 import torch
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from your_model import YourModel  # Импортируйте свою обученную модель
 
 # Настройки Redis
@@ -39,7 +39,7 @@ def run_inference(model, data):
 def log_prediction(prediction):
     # Логируем предсказание в файл
     with open("logs/realtime_inference.log", "a") as log_file:
-        log_file.write(f"{datetime.utcnow()} - Prediction: {prediction}\n")
+        log_file.write(f"{datetime.now(timezone.utc)} - Prediction: {prediction}\n")
 
 def main():
     while True:
