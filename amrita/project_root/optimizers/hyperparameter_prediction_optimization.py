@@ -48,6 +48,14 @@ def denormalize_interval(value):
     max_value = 125000
     return value * (max_value - min_value) + min_value
 
+def denormalize_imbalance(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = -1
+    max_value = 1
+    return value * (max_value - min_value) + min_value
+
 class TradingEnvironment:
     def __init__(self, X, agent):
         """
@@ -461,6 +469,7 @@ class TradingEnvironment:
         """
         Определяет направление сделки на основе данных интервалов, стакана и новых индикаторов.
         """
+        # logging.info(f"Direction - 5m_trend_strength: {trends['5m_trend_strength']}, 1m_trend_strength: {trends['1m_trend_strength']}, imbalance: {imbalance}, cci: {trends['cci']}")
         if trends["5m_trend_strength"] > 0 and trends["1m_trend_strength"] > 0 and imbalance > 0 and trends["cci"] > 100:
             # Сильный тренд вверх, CCI подтверждает перекупленность
             return "long"
@@ -538,7 +547,7 @@ class TradingEnvironment:
         self.current_price = self.X[self.current_step][0]  # Цена текущей свечи
         # Анализ трендов
         trends = self.analyze_trends()
-        imbalance = self.X[self.current_step][3]  # bid_ask_imbalance
+        imbalance = denormalize_imbalance(self.X[self.current_step][3])  # bid_ask_imbalance
         
         # Штраф за ликвидацию через reward
         if self._check_liquidation():

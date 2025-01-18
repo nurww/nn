@@ -52,6 +52,14 @@ def denormalize(value):
 def normalize(value, min_val = 0, max_val = 125000, precision=25):
     return round(value - min_val) / (max_val - min_val)
 
+def denormalize_imbalance(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = -1
+    max_value = 1
+    return value * (max_value - min_value) + min_value
+
 class TradingEnvironment:
     def __init__(self, agent):
         self.current_X = None
@@ -131,7 +139,7 @@ class TradingEnvironment:
         self.current_price = self.current_X[0]  # Цена текущей свечи
         # Анализ трендов
         trends = self.analyze_trends()
-        imbalance = self.current_X[3]
+        imbalance = denormalize_imbalance(self.current_X[3])  # bid_ask_imbalance
 
         # Штраф за ликвидацию через reward
         if self._check_liquidation():
