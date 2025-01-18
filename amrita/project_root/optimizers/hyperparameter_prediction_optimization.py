@@ -40,6 +40,14 @@ def denormalize(value):
     max_value = 115000
     return value * (max_value - min_value) + min_value
 
+def denormalize_interval(value):
+    """
+    Денормализует значение на основе диапазона.
+    """
+    min_value = 0
+    max_value = 125000
+    return value * (max_value - min_value) + min_value
+
 class TradingEnvironment:
     def __init__(self, X, agent):
         """
@@ -150,10 +158,69 @@ class TradingEnvironment:
         """
         return self.futures_balance / 2
     
+    def record_future_data(self, steps=2400):
+        """
+        Записывает будущие данные за указанное количество шагов.
+        """
+        if self.current_step + steps < len(self.X):
+            return self.X[self.current_step:self.current_step + steps, 0]
+        return []
+    
+    def retrospective_analysis_stop_loss_take_profit(self, closed_position):
+        # Фактические данные
+        actual_pnl = closed_position["pnl"]  # Фактический результат сделки
+        entry_price = closed_position["entry_price"]
+
+        # Рыночные данные интервалов
+        actual_stop_loss = closed_position.get("stop_loss", None)
+        actual_take_profit = closed_position.get("take_profit", None)
+
+        # Предсказания модели
+        predicted_stop_loss = closed_position.get("predicted_stop_loss", None)
+        predicted_take_profit = closed_position.get("predicted_take_profit", None)
+
+        # Проверка, нужно ли анализировать
+        if predicted_stop_loss is None or predicted_take_profit is None:
+            # Если предсказаний нет, пропускаем анализ
+            return 0
+        
+        # Теоретический PnL на основе предсказаний
+        predicted_pnl = 0
+        if closed_position["direction"] == "long":
+            if actual_stop_loss and actual_stop_loss <= predicted_stop_loss:  # Если stop_loss сработал
+                predicted_pnl = predicted_stop_loss - entry_price
+            elif actual_take_profit and actual_take_profit >= predicted_take_profit:  # Если take_profit сработал
+                predicted_pnl = predicted_take_profit - entry_price
+        elif closed_position["direction"] == "short":
+            if actual_stop_loss and actual_stop_loss >= predicted_stop_loss:  # Если stop_loss сработал
+                predicted_pnl = entry_price - predicted_stop_loss
+            elif actual_take_profit and actual_take_profit <= predicted_take_profit:  # Если take_profit сработал
+                predicted_pnl = entry_price - predicted_take_profit
+
+        # Оценка награды
+        reward = predicted_pnl - actual_pnl  # Разница между предсказанным и фактическим результатом
+        reward = max(min(reward, 1), -1)  # Нормализация награды в диапазоне [-1, 1]
+
+        # Штраф за нереалистичные значения
+        if actual_stop_loss and predicted_stop_loss < actual_stop_loss:
+            reward -= 0.5  # Штраф за слишком низкий stop_loss
+        if actual_take_profit and predicted_take_profit > actual_take_profit:
+            reward -= 0.5  # Штраф за слишком высокий take_profit
+
+        # Уточнение анализа или пропуск анализа
+        if actual_stop_loss == predicted_stop_loss and actual_take_profit == predicted_take_profit:
+            # Если фактические значения равны предсказанным, анализ не нужен
+            return reward
+
+        # Передача опыта агенту
+        state = self._get_state(force_last_state=True)
+        action = [2, []]
+        self.agent.store_experience(state, action, reward, state, False)
+
+        # Возврат награды
+        return state, action, reward
+
     def retrospective_analysis(self, closed_position, future_data):
-        """
-        Анализ завершенной позиции.
-        """
         entry_price = closed_position["entry_price"]
         direction = closed_position["direction"]
         position_size = closed_position["position_size"]
@@ -169,28 +236,57 @@ class TradingEnvironment:
             logging.warning("Position would have been liquidated. Retrospective analysis skipped.")
             return None
 
-        # Ищем лучшую возможную цену для выхода
+        # Анализ достижения stop_loss и take_profit
+        if direction == "long":
+            stop_loss_hit = (future_data <= closed_position["stop_loss"]).any()
+            take_profit_hit = (future_data >= closed_position["take_profit"]).any()
+            optimal_stop_loss = future_data[future_data <= entry_price].min() if (future_data <= entry_price).any() else closed_position["stop_loss"]
+            optimal_take_profit = future_data.max()
+        else:  # short
+            stop_loss_hit = (future_data >= closed_position["stop_loss"]).any()
+            take_profit_hit = (future_data <= closed_position["take_profit"]).any()
+            optimal_stop_loss = future_data[future_data >= entry_price].max() if (future_data >= entry_price).any() else closed_position["stop_loss"]
+            optimal_take_profit = future_data.min()
+
+        # Используем предсказания агента, если они лучше
+        predicted_stop_loss = closed_position["stop_loss"]
+        predicted_take_profit = closed_position["take_profit"]
+        if abs(predicted_stop_loss - entry_price) < abs(optimal_stop_loss - entry_price):
+            optimal_stop_loss = predicted_stop_loss
+        if abs(predicted_take_profit - entry_price) > abs(optimal_take_profit - entry_price):
+            optimal_take_profit = predicted_take_profit
+
+        # Лучшая цена выхода
         if direction == "long":
             best_exit_price = future_data.max()
             best_pnl = (best_exit_price - entry_price) * position_size
-            # logging.info(f"retrospective_analysis() - best_pnl: {best_pnl}, entry_price: {entry_price}, best_exit_price: {best_exit_price}, position_size: {position_size}")
         else:
             best_exit_price = future_data.min()
             best_pnl = (entry_price - best_exit_price) * position_size
-            # logging.info(f"retrospective_analysis() - best_pnl: {best_pnl}, entry_price: {entry_price}, best_exit_price: {best_exit_price}, position_size: {position_size}")
-        
+
+        # logging.info(f"retrospective_analysis() - best_pnl: {best_pnl}, entry_price: {entry_price}, "
+        #             f"best_exit_price: {best_exit_price}, position_size: {position_size}, liquidation_price: {self.liquidation_price}")
+
         # Сравниваем лучший PnL с фактическим
         actual_pnl = closed_position["pnl"]
-        if best_pnl > actual_pnl:
-            reward = best_pnl - actual_pnl
-            # logging.info(f"retrospective_analysis() 'if best_pnl > actual_pnl' - reward: {reward}, best_pnl: {best_pnl}, actual_pnl: {actual_pnl}")
-            state = self._get_state(force_last_state=True)
-            action = [2, []]
-            # logging.info(f"Retrospective analysis: Missed opportunity to close at {best_exit_price:.5f}, "
-            #             f"Best PnL: {best_pnl:.5f}, Actual PnL: {actual_pnl:.5f}")
-            return state, action, reward
-        # logging.info(f"retrospective_analysis() return None? actual_pnl: {actual_pnl}")
-        return None
+        reward = max(0, best_pnl - actual_pnl)
+
+        # Учет stop_loss и take_profit
+        penalty_weight = 0.1
+        reward_weight = 0.1
+        if stop_loss_hit:
+            reward -= penalty_weight * abs(predicted_stop_loss - optimal_stop_loss)
+        if take_profit_hit:
+            reward += reward_weight * abs(predicted_take_profit - optimal_take_profit)
+
+        # Обновляем состояние
+        state = self._get_state(force_last_state=True)
+        action = [2, []]
+
+        # Сохраняем опыт
+        self.agent.store_experience(state, action, reward, state, False)
+
+        return state, action, reward
 
     def close_all_positions(self):
         for position in self.positions:
@@ -225,60 +321,54 @@ class TradingEnvironment:
         """
         # Анализ текущей цены
         current_price = denormalize(self.current_price)
-        model_output = self.agent.predict(self._get_state(force_last_state=True))
-        _, predicted_stop_loss, predicted_take_profit = model_output
 
-        # Получение рыночных границ
-        interval_low = denormalize(self.X[self.current_step][98])  # Минимальная цена из интервала
-        interval_high = denormalize(self.X[self.current_step][99])  # Максимальная цена из интервала
+        # Получение предсказаний модели
+        _, predicted_stop_loss, predicted_take_profit = self.agent.predict(self._get_state(force_last_state=True))
+        predicted_stop_loss = float(predicted_stop_loss)
+        predicted_take_profit = float(predicted_take_profit)
 
-        # Определяем допустимые диапазоны с отклонением в процентах
-        tolerance = 0.03  # Допустимое отклонение (3%)
-        adjusted_low = interval_low * (1 - tolerance)  # Нижняя граница с запасом
-        adjusted_high = interval_high * (1 + tolerance)  # Верхняя граница с запасом
-
-        # Предсказания модели
+        # Преобразование в абсолютные значения
         proposed_stop_loss = current_price * (1 - predicted_stop_loss)
         proposed_take_profit = current_price * (1 + predicted_take_profit)
+        predicted_stop_loss = proposed_stop_loss
+        predicted_take_profit = proposed_take_profit
 
-        # Логирование предсказаний
-        # logging.info(
-        #     f"Proposed stop_loss: {proposed_stop_loss}, Proposed take_profit: {proposed_take_profit}, "
-        #     f"Adjusted_low: {adjusted_low}, Adjusted_high: {adjusted_high}"
-        # )
+        # Получение рыночных границ
+        interval_low_5m = denormalize_interval(self.X[self.current_step][98])  # Минимальная цена из интервала
+        interval_high_5m = denormalize_interval(self.X[self.current_step][99])  # Максимальная цена из интервала
+        interval_low_1m = denormalize_interval(self.X[self.current_step][120])  # Минимальная цена из интервала
+        interval_high_1m = denormalize_interval(self.X[self.current_step][121])  # Максимальная цена из интервала
+        
+        # Определяем допустимые диапазоны с отклонением в процентах
+        # Рассчёт допустимых диапазонов (5m + 1m) с допуском
+        tolerance = 0.003  # Допустимое отклонение (3%)
+        adjusted_low = max(interval_low_5m, interval_low_1m) * (1 - tolerance)
+        adjusted_high = min(interval_high_5m, interval_high_1m) * (1 + tolerance)
+
+        # Проверяем границы ликвидационной цены
+        liquidation_price = position["liquidation_price"]
+        adjusted_low = max(adjusted_low, liquidation_price * 1.005)  # Не ниже ликвидации
+        adjusted_high = min(adjusted_high, liquidation_price * 0.995)  # Не выше ликвидации
 
         # Корректируем значения для long позиции
         if position["direction"] == "long":
-            # Проверка stop_loss
             if proposed_stop_loss < adjusted_low:
-                # logging.warning(f"Proposed stop_loss {proposed_stop_loss} is below adjusted_low {adjusted_low}. Adjusting.")
                 proposed_stop_loss = adjusted_low
-            # Проверка take_profit
             if proposed_take_profit > adjusted_high:
-                # logging.warning(f"Proposed take_profit {proposed_take_profit} is above adjusted_high {adjusted_high}. Adjusting.")
                 proposed_take_profit = adjusted_high
-
-            # Применяем значения
-            position["stop_loss"] = max(position["stop_loss"], proposed_stop_loss)
-            position["take_profit"] = min(position["take_profit"], proposed_take_profit)  # Ограничиваем до adjusted_high
 
         # Корректируем значения для short позиции
         elif position["direction"] == "short":
-            # Проверка stop_loss
             if proposed_stop_loss > adjusted_high:
-                # logging.warning(f"Proposed stop_loss {proposed_stop_loss} is above adjusted_high {adjusted_high}. Adjusting.")
                 proposed_stop_loss = adjusted_high
-            # Проверка take_profit
             if proposed_take_profit < adjusted_low:
-                # logging.warning(f"Proposed take_profit {proposed_take_profit} is below adjusted_low {adjusted_low}. Adjusting.")
                 proposed_take_profit = adjusted_low
 
-            # Применяем значения
-            position["stop_loss"] = min(position["stop_loss"], proposed_stop_loss)
-            position["take_profit"] = max(position["take_profit"], proposed_take_profit)  # Ограничиваем до adjusted_low
-
-        # Логируем итоговые значения
-        # logging.info(f"Final Adjusted stop_loss: {position['stop_loss']}, take_profit: {position['take_profit']}")
+        # Прямое присвоение значений stop_loss и take_profit
+        position["stop_loss"] = proposed_stop_loss
+        position["take_profit"] = proposed_take_profit
+        position["predicted_stop_loss"] = predicted_stop_loss
+        position["predicted_take_profit"] = predicted_take_profit
 
     def reset(self, trade_balance):
         """
@@ -315,7 +405,7 @@ class TradingEnvironment:
                 # logging.warning("Current step exceeds data length. Returning last valid state.")
                 last_valid_step = len(self.X) - 1  # Последний доступный шаг
                 row_data = self.X[last_valid_step]
-                state = {
+                return {
                     "state_data": np.concatenate([
                         np.array([
                             float(self.spot_balance),
@@ -334,7 +424,6 @@ class TradingEnvironment:
                     "current_pnl": current_pnl,  # Добавляем текущий PnL
                     "liquidation_price": self.liquidation_price  # Liquidation price
                 }
-                return state
             else:
                 logging.warning("Current step exceeds data length. Returning default state.")
                 return {
@@ -442,7 +531,7 @@ class TradingEnvironment:
         if self.current_step >= len(self.X):
             # logging.warning("Current step exceeds data length. Ending the episode.")
             self._close_positions()
-            # self.train_on_experience()
+            self.train_on_experience()
             return self._get_state(), 0, True  # Завершаем эпизод
 
         # Обновление текущей цены
@@ -514,7 +603,7 @@ class TradingEnvironment:
             return
         
         mid_price = denormalize(self.current_price)  # mid_price из стакана
-    
+
         # Расчет trade_balance
         # Используем половину фьючерсного баланса для торговли
         trade_balance = self.get_trade_balance()
@@ -523,16 +612,6 @@ class TradingEnvironment:
         
         if self.futures_balance <= position_size / mid_price:
             return
-        
-        # Предсказания от агента
-        _, predicted_stop_loss, predicted_take_profit = self.agent.predict(self._get_state(force_last_state=True))
-        predicted_stop_loss = float(predicted_stop_loss)
-        predicted_take_profit = float(predicted_take_profit)
-        # logging.info(f"_open_position - stop loss: {predicted_stop_loss}, take profit: {predicted_take_profit}")
-        # logging.info(f"_open_position - stop loss: {denormalize(predicted_stop_loss)}, take profit: {denormalize(predicted_take_profit)}")
-
-        stop_loss = mid_price * (1 - predicted_stop_loss)  # Преобразуем из нормализованных значений
-        take_profit = mid_price * (1 + predicted_take_profit)
         
         self.liquidation_price = self._calculate_liquidation_price(total_position_size, mid_price, direction)
         self.futures_balance -= position_size / mid_price
@@ -543,12 +622,15 @@ class TradingEnvironment:
         position = {
             "position_id": position_id,
             "entry_price": mid_price,
+            "pos_s": position_size,
             "position_size": total_position_size,
             "direction": direction,
             "liquidation_price": self.liquidation_price,
             "entry_step": self.current_step,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
+            "stop_loss": None,
+            "take_profit": None,
+            "predicted_stop_loss": None,
+            "predicted_take_profit": None,
         }
         
         self.adjust_stop_loss_take_profit(position)
@@ -575,15 +657,26 @@ class TradingEnvironment:
         total_reward = 0
 
         # Устанавливаем комиссию как долю от размера позиции
-        commission_rate = 0.1  # 0.1% комиссии как на Binance
+        # commission_rate = 0.1  # 0.1% комиссии как на Binance
+        maker_commission_rate = 0.0002  # 0.02%
+        taker_commission_rate = 0.0004  # 0.04%
+        funding_rate = 0.0001  # Пример ставки финансирования (нужно брать актуальное значение)
 
         for i, position in enumerate(self.positions):
             reward = 0  # Инициализация reward
             try:
                 pnl = self._calculate_pnl(position)
-                position_size = position.get("position_size", 0) / denormalize(self.current_price)
-                commission = position_size * commission_rate
-                pnl -= commission
+                # position_size = position.get("position_size", 0) / denormalize(self.current_price)
+                
+                maker_commission = position.get("pos_s", 0) * maker_commission_rate
+                taker_commission = position.get("pos_s", 0) * taker_commission_rate
+                # Финансирование
+                funding_fee = position.get("pos_s", 0) * funding_rate                
+                # Общая комиссия
+                total_commission = maker_commission + taker_commission + funding_fee
+
+                # commission = position_size * commission_rate
+                pnl -= total_commission
                 total_pnl += pnl
 
                 self.futures_balance += total_pnl
@@ -619,15 +712,14 @@ class TradingEnvironment:
                 # else:
                     # logging.warning("No cutoff point found. future_data_denormalized remains unchanged.")
 
-                retrospective_experience = self.retrospective_analysis(position, future_data_denormalized)
-                if retrospective_experience:
-                    state, action, reward = retrospective_experience
-                    # logging.info(f"_close_positions() 'if retrospective_experience' - reward: {reward}")
-                    self.agent.store_experience(state, action, reward, self._get_state(force_last_state=True), False)
+                self.retrospective_analysis(position, future_data_denormalized)
+                self.retrospective_analysis_stop_loss_take_profit(position)
+                
             except Exception as e:
                 errors.append((i, str(e)))
                 logging.error(f"Error closing position {i}: {e}")
             finally:
+                # logging.info(f"_close_positions() FINAL - stop_loss: {position['stop_loss']}, take_profit: {position['take_profit']}")
                 # Логирование закрытия сделки
                 self.trade_log.append({
                     "action": "close",
@@ -641,7 +733,7 @@ class TradingEnvironment:
                     "stop_loss": position["stop_loss"],
                     "take_profit": position["take_profit"],
                     "pnl": pnl,
-                    "commission": commission,
+                    "commission": total_commission,
                     "exit_spot_balance": self.spot_balance,
                     "exit_futures_balance": self.futures_balance,
                     "entry_data": self._get_state(force_last_state=True)
@@ -1021,7 +1113,7 @@ class DQLAgent:
             raise ValueError(f"Invalid next_state to store: {next_state}")
         # Рассчитываем дополнительную награду за удержание позиции, избегание ликвидации
         pnl_reward = state["current_pnl"] * 0.1  # Вес PnL
-        liquidation_penalty = -1.0 if state["liquidation_price"] <= state["state_data"][3] else 0.0  # Штраф за ликвидацию
+        liquidation_penalty = -1.0 if state["liquidation_price"] <= state["state_data"][6] else 0.0  # Штраф за ликвидацию
 
         adjusted_reward = reward + pnl_reward + liquidation_penalty
 
@@ -1035,6 +1127,8 @@ class DQLAgent:
         raise TypeError("State must be a dictionary containing 'state_data'.")
 
     def learn(self):
+        # if len(self.memory) % 1000 == 0:
+        #     logging.info(f"learn(self) - memory: {len(self.memory)}, batch_size: {self.batch_size}")
         if len(self.memory) < self.batch_size:
             return
 
@@ -1848,7 +1942,7 @@ def objective(trial):
             agent.update_target_network()
             print(f"Target network updated at episode {episode + 1}")
             logging.info(f"Target network updated at episode {episode + 1}")
-            env.close_all_positions()
+            # env.close_all_positions()
             # Сохранение модели
             torch.save(agent.q_network.state_dict(), MODEL_PATH)
             print(f"Модель сохранена: {MODEL_PATH}")
