@@ -76,7 +76,7 @@ class TradingEnvironment:
         self.start_balance = 0
         self.liquidation_price = 0
         self.initial_spot_balance=28
-        self.initialize_balances(trade_balance=200)
+        self.initialize_balances(trade_balance=1100)
 
     def initialize_balances(self, trade_balance):
         """
@@ -616,6 +616,27 @@ class TradingEnvironment:
         # Расчет trade_balance
         # Используем половину фьючерсного баланса для торговли
         trade_balance = self.get_trade_balance()
+        
+        # TODO
+        # TODO
+        # TODO
+        # TODO
+        # Проверка и обновление плеча только при изменении
+        new_leverage = self.leverage
+        if trade_balance * self.leverage > 11900000:
+            new_leverage = 25
+        elif trade_balance * self.leverage > 2900000:
+            new_leverage = 50
+        elif trade_balance * self.leverage > 580000:
+            new_leverage = 75
+        elif trade_balance * self.leverage > 49000:
+            new_leverage = 100
+
+        # Изменение плеча и логирование только при пересечении границы
+        if new_leverage != self.leverage:
+            logging.info(f"Trade balance exceeds limit: {trade_balance}, Leverage adjusted from {self.leverage} to {new_leverage}")
+            self.leverage = new_leverage
+
         position_size = trade_balance
         total_position_size = (self.leverage * position_size) / mid_price
         
@@ -631,9 +652,10 @@ class TradingEnvironment:
         position = {
             "position_id": position_id,
             "entry_price": mid_price,
-            "pos_s": position_size,
+            "pos_size_usdt": position_size,
             "position_size": total_position_size,
             "direction": direction,
+            "leverage": self.leverage,
             "liquidation_price": self.liquidation_price,
             "entry_step": self.current_step,
             "stop_loss": None,
@@ -677,10 +699,10 @@ class TradingEnvironment:
                 pnl = self._calculate_pnl(position)
                 # position_size = position.get("position_size", 0) / denormalize(self.current_price)
                 
-                maker_commission = position.get("pos_s", 0) * maker_commission_rate
-                taker_commission = position.get("pos_s", 0) * taker_commission_rate
+                maker_commission = position.get("pos_size_usdt", 0) * maker_commission_rate
+                taker_commission = position.get("pos_size_usdt", 0) * taker_commission_rate
                 # Финансирование
-                funding_fee = position.get("pos_s", 0) * funding_rate                
+                funding_fee = position.get("pos_size_usdt", 0) * funding_rate                
                 # Общая комиссия
                 total_commission = maker_commission + taker_commission + funding_fee
 
@@ -735,9 +757,11 @@ class TradingEnvironment:
                     "entry_step": position["entry_step"],
                     "step": self.current_step,
                     "direction": position["direction"],
+                    "leverage": position["leverage"],
                     "entry_price": position["entry_price"],
                     "exit_price": denormalize(self.current_price),
                     "position_size": position["position_size"],
+                    "pos_size_usdt": position.get("pos_size_usdt", 0) * position["leverage"],
                     "liquidation_price": position["liquidation_price"],
                     "stop_loss": position["stop_loss"],
                     "take_profit": position["take_profit"],
@@ -784,8 +808,10 @@ class TradingEnvironment:
                     "Цена входа": log.get("entry_price", "N/A"),
                     "Цена выхода": log.get("exit_price", "N/A"),
                     "Направление": log.get("direction", "N/A"),
+                    "Плечо": log.get("leverage", "N/A"),
                     "Прибыль/Убыток": log.get("pnl", "N/A"),
                     "Размер позиции": log.get("position_size", "N/A"),
+                    "Размер позиции (USDT)": log.get("pos_size_usdt", "N/A"),
                     "Ликвидация": log.get("liquidation_price", "N/A"),
                     "Комиссия": log.get("commission", "N/A"),
                     "Stop Loss": log.get("stop_loss", "N/A"),
@@ -1904,7 +1930,7 @@ def objective(trial):
     target_update_frequency = 2  # Как часто обновлять целевую сеть
 
     for episode in range(episodes):
-        state = env.reset(trade_balance=200)
+        state = env.reset(trade_balance=1100)
         total_reward = 0
 
         while True:
